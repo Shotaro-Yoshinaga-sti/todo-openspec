@@ -1,6 +1,7 @@
 import { Module, Global } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { CosmosClient } from '@azure/cosmos';
+import * as https from 'https';
 
 export const COSMOS_CLIENT = 'COSMOS_CLIENT';
 
@@ -18,7 +19,23 @@ export const COSMOS_CLIENT = 'COSMOS_CLIENT';
           throw new Error('CosmosDB endpoint and key must be provided');
         }
 
-        const client = new CosmosClient({ endpoint, key });
+        // For local development with Cosmos DB Emulator
+        const isEmulator = endpoint.includes('localhost') || endpoint.includes('127.0.0.1');
+
+        const client = new CosmosClient({
+          endpoint,
+          key,
+          connectionPolicy: {
+            ...(isEmulator && {
+              requestTimeout: 30000,
+            }),
+          },
+          ...(isEmulator && {
+            agent: new https.Agent({
+              rejectUnauthorized: false,
+            }),
+          }),
+        });
 
         // Create database and container if they don't exist
         const databaseName = configService.get<string>('COSMOS_DB_DATABASE_NAME');
