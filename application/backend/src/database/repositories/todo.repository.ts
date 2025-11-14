@@ -21,20 +21,26 @@ export class TodoRepository {
   ) {
     const databaseName = this.configService.get<string>('COSMOS_DB_DATABASE_NAME');
     const containerName = this.configService.get<string>('COSMOS_DB_CONTAINER_NAME');
-    this.container = this.cosmosClient
-      .database(databaseName)
-      .container(containerName);
+
+    if (!databaseName || !containerName) {
+      throw new Error('Database name and container name must be provided');
+    }
+
+    this.container = this.cosmosClient.database(databaseName).container(containerName);
   }
 
   async create(todo: Todo): Promise<Todo> {
     const { resource } = await this.container.items.create(todo);
+    if (!resource) {
+      throw new Error('Failed to create todo item');
+    }
     return new Todo(resource);
   }
 
   async findAll(filters?: TodoFilter): Promise<Todo[]> {
     let query = 'SELECT * FROM c';
     const conditions: string[] = [];
-    const parameters: any[] = [];
+    const parameters: Array<{ name: string; value: string }> = [];
 
     if (filters?.status) {
       conditions.push('c.status = @status');
@@ -69,8 +75,8 @@ export class TodoRepository {
     try {
       const { resource } = await this.container.item(id, id).read();
       return resource ? new Todo(resource) : null;
-    } catch (error: any) {
-      if (error.code === 404) {
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 404) {
         return null;
       }
       throw error;
@@ -92,6 +98,9 @@ export class TodoRepository {
     };
 
     const { resource } = await this.container.item(id, id).replace(updated);
+    if (!resource) {
+      throw new Error('Failed to update todo item');
+    }
     return new Todo(resource);
   }
 
@@ -99,8 +108,8 @@ export class TodoRepository {
     try {
       await this.container.item(id, id).delete();
       return true;
-    } catch (error: any) {
-      if (error.code === 404) {
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 404) {
         throw new Error(`Todo with id ${id} not found`);
       }
       throw error;
