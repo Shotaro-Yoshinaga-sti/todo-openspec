@@ -1,656 +1,357 @@
-# Design: Two-Factor Authentication (TOTP)
+# Design: Add Two-Factor Authentication
 
-## Architecture Overview
+## Context
 
-```
-┌─────────────┐         ┌──────────────┐         ┌─────────────┐
-│  Frontend   │  HTTPS  │   NestJS     │  Query  │  CosmosDB   │
-│  (Next.js)  │◄───────►│   Backend    │◄───────►│  Users      │
-└─────────────┘         └──────────────┘         │  (encrypted │
-      │                        │                  │  totpSecret)│
-      │                        │                  └─────────────┘
-      │                 ┌──────▼──────┐
-      │                 │   otplib    │
-      │                 │  (TOTP Gen) │
-      │                 └─────────────┘
-      │
-      ▼
-┌─────────────────┐
-│ Google Auth App │
-│ (User's Phone)  │
-└─────────────────┘
-```
+エンジニア向けTODOリストアプリケーションに、Google OAuth認証とTOTP二要素認証を実装します。現在、認証機能は未実装であり、全てのAPIエンドポイントは認証なしでアクセス可能です。
 
-## TOTP (Time-based One-Time Password) 仕組み
+**制約条件**:
+- 個人利用レベル（数百件のTODO想定）
+- Azure無料枠・低コスト運用
+- CosmosDBを使用
+- NestJSバックエンド、Next.jsフロントエンド
 
-### アルゴリズム
+## Goals / Non-Goals
 
-TOTPはRFC 6238で定義された標準アルゴリズム：
+**Goals**:
+- セキュアなGoogle OAuth認証
+- 強力な二要素認証（TOTP）
+- ユーザーごとのデータ完全分離
+- 使いやすい認証フロー
+- 低コストでの運用
 
-```
-TOTP = HOTP(K, T)
+**Non-Goals**:
+- SMS認証（コスト高）
+- 複数の認証プロバイダー（Google以外）
+- バックアップコード（Phase 2で実装）
+- WebAuthn/FIDO2（将来実装）
 
-where:
-  K = 秘密鍵 (Secret Key)
-  T = floor(現在時刻 / 時間ステップ)
-  HOTP = HMAC-based One-Time Password (RFC 4226)
-```
+## Decisions
 
-**具体的な計算**:
-1. 現在のUNIXタイムスタンプを取得（秒）
-2. タイムステップ（30秒）で割る → カウンター値
-3. 秘密鍵とカウンター値でHMAC-SHA1を計算
-4. HMACの結果から6桁の数字を抽出
+### 1. 認証アーキテクチャ: Google OAuth + TOTP
 
-**特徴**:
-- サーバーとクライアント（Google Authenticator）が同じ秘密鍵を共有
-- 両方が現在時刻を使って同じコードを生成
-- 30秒ごとにコードが変わる
-- 時計のずれを考慮して前後1ステップ（±30秒）も許容
-
-## 認証フロー
-
-### 初回ログイン（2FAセットアップ）
+**決定**: 第一要素にGoogle OAuth、第二要素にTOTPを使用
 
 ```
-User                Frontend           Backend             CosmosDB        Google Auth App
- │                    │                   │                   │                  │
- │  1. Login Button   │                   │                   │                  │
- ├──────────────────►│                   │                   │                  │
- │                    │  2. OAuth Start   │                   │                  │
- │                    ├──────────────────►│                   │                  │
- │                    │                   │  3. Google OAuth  │                  │
- │◄───────────────────┴───────────────────┤                   │                  │
- │  4. Authenticate at Google             │                   │                  │
- ├────────────────────────────────────────►                   │                  │
- │  5. Callback + User Info               │                   │                  │
- ├────────────────────┬───────────────────►                   │                  │
- │                    │                   │  6. Check 2FA     │                  │
- │                    │                   ├──────────────────►│                  │
- │                    │                   │  twoFactorSetupComplete = false     │
- │                    │                   │◄──────────────────┤                  │
- │                    │  7. Redirect to   │                   │                  │
- │                    │  2FA Setup        │                   │                  │
- │                    │◄──────────────────┤                   │                  │
- │  8. Setup Screen   │                   │                   │                  │
- │◄───────────────────┤                   │                   │                  │
- │                    │  9. Request QR    │                   │                  │
- │                    ├──────────────────►│                   │                  │
- │                    │                   │ 10. Generate      │                  │
- │                    │                   │  Secret + QR      │                  │
- │                    │                   │ 11. Encrypt &     │                  │
- │                    │                   │  Save Secret      │                  │
- │                    │                   ├──────────────────►│                  │
- │                    │ 12. Return QR     │                   │                  │
- │                    │◄──────────────────┤                   │                  │
- │ 13. Display QR     │                   │                   │                  │
- │◄───────────────────┤                   │                   │                  │
- │ 14. Scan QR Code   │                   │                   │                  │
- ├────────────────────┴───────────────────┴───────────────────┴─────────────────►│
- │ 15. Generate TOTP (every 30s)                                                 │
- │◄──────────────────────────────────────────────────────────────────────────────┤
- │ 16. Enter Code     │                   │                   │                  │
- ├───────────────────►│                   │                   │                  │
- │                    │ 17. Verify TOTP   │                   │                  │
- │                    ├──────────────────►│                   │                  │
- │                    │                   │ 18. Decrypt       │                  │
- │                    │                   │  Secret           │                  │
- │                    │                   │◄──────────────────┤                  │
- │                    │                   │ 19. Verify Code   │                  │
- │                    │                   │  (otplib)         │                  │
- │                    │                   │ 20. Mark Setup    │                  │
- │                    │                   │  Complete         │                  │
- │                    │                   ├──────────────────►│                  │
- │                    │ 21. Issue JWT     │                   │                  │
- │                    │◄──────────────────┤                   │                  │
- │ 22. Logged In      │                   │                   │                  │
- │◄───────────────────┤                   │                   │                  │
+┌─────────────────────────────────────────────────────────┐
+│                    認証フロー全体                         │
+└─────────────────────────────────────────────────────────┘
+
+Step 1: Google OAuth認証
+  ユーザー → Google OAuth同意画面 → コールバック
+  ↓
+  一時トークン発行（2FA未完了）
+
+Step 2: 2FA状態確認
+  IF twoFactorSetupComplete == false:
+    → 2FAセットアップ画面
+  ELSE:
+    → TOTP検証画面
+
+Step 3a: 2FAセットアップ（初回のみ）
+  - TOTP秘密鍵生成
+  - QRコード表示
+  - ユーザーがAuthenticatorアプリでスキャン
+  - テストコード入力で検証
+  - セットアップ完了フラグ設定
+
+Step 3b: TOTP検証（2回目以降）
+  - ユーザーがAuthenticatorアプリからコード入力
+  - バックエンドでコード検証
+  - 成功 → JWTトークン発行
+
+Step 4: 完全な認証完了
+  - 長期有効なJWTトークン発行
+  - ユーザーセッション確立
 ```
 
-### 2回目以降のログイン（2FA検証のみ）
+**理由**:
+- Google OAuthで認証の手間を最小化
+- TOTPで追加のセキュリティレイヤー
+- Authenticatorアプリはエンジニアなら既に使用している
+- SMSより低コスト（無料）
 
-```
-User                Frontend           Backend             CosmosDB        Google Auth App
- │                    │                   │                   │                  │
- │  1. Login          │                   │                   │                  │
- ├──────────────────►│                   │                   │                  │
- │  2. OAuth Flow (simplified)            │                   │                  │
- ├────────────────────┴───────────────────┤                   │                  │
- │  3. OAuth Success  │                   │                   │                  │
- ├────────────────────┬───────────────────►                   │                  │
- │                    │                   │  4. Check 2FA     │                  │
- │                    │                   ├──────────────────►│                  │
- │                    │                   │  twoFactorSetupComplete = true      │
- │                    │                   │◄──────────────────┤                  │
- │                    │  5. Redirect to   │                   │                  │
- │                    │  TOTP Input       │                   │                  │
- │                    │◄──────────────────┤                   │                  │
- │  6. TOTP Screen    │                   │                   │                  │
- │◄───────────────────┤                   │                   │                  │
- │  7. Get Code from App                                      │                  │
- ├────────────────────┴───────────────────┴───────────────────┴─────────────────►│
- │◄──────────────────────────────────────────────────────────────────────────────┤
- │  8. Enter Code     │                   │                   │                  │
- ├───────────────────►│                   │                   │                  │
- │                    │  9. Verify TOTP   │                   │                  │
- │                    ├──────────────────►│                   │                  │
- │                    │                   │ 10. Get Secret    │                  │
- │                    │                   ├──────────────────►│                  │
- │                    │                   │ 11. Decrypt       │                  │
- │                    │                   │◄──────────────────┤                  │
- │                    │                   │ 12. Verify Code   │                  │
- │                    │                   │ 13. Check Replay  │                  │
- │                    │                   │ 14. Issue JWT     │                  │
- │                    │◄──────────────────┤                   │                  │
- │ 15. Logged In      │                   │                   │                  │
- │◄───────────────────┤                   │                   │                  │
-```
+**代替案**:
+- ❌ **メール/パスワード + TOTP**: パスワード管理の手間、セキュリティリスク
+- ❌ **SMS 2FA**: コスト高、個人プロジェクトに不適
+- ❌ **OAuth のみ**: セキュリティ不足
 
-## Data Model
+### 2. セッション管理: JWT (Stateless)
 
-### User Entity (Extended)
+**決定**: JWTトークンでステートレスなセッション管理
 
 ```typescript
+// JWTペイロード
+interface JwtPayload {
+  sub: string;           // userId
+  email: string;
+  twoFactorVerified: boolean;  // 2FA検証済みフラグ
+  iat: number;
+  exp: number;
+}
+```
+
+**トークン種別**:
+- **一時トークン**: OAuth認証後、2FA未完了（有効期限: 10分）
+- **本トークン**: 2FA検証後（有効期限: 7日）
+
+**理由**:
+- ステートレス（Redisなど不要）でコスト削減
+- スケーラブル（将来の拡張性）
+- NestJSのJWT統合が優れている
+
+**代替案**:
+- ❌ **セッションストア（Redis）**: コスト増、個人プロジェクトには過剰
+- ❌ **Cookie-based session**: スケールしづらい
+
+### 3. TOTP実装: otplib + QRコード
+
+**決定**: `otplib`ライブラリと`qrcode`でTOTP実装
+
+```typescript
+// TOTP設定
+const TOTP_CONFIG = {
+  algorithm: 'sha1',
+  digits: 6,
+  period: 30,        // 30秒ごとに更新
+  window: 1,         // 前後1ステップ許容（時計のずれ対応）
+};
+
+// セットアップフロー
+1. 秘密鍵生成: authenticator.generateSecret()
+2. QRコード生成: qrcode.toDataURL(otpauthUrl)
+3. 検証: authenticator.verify({ token, secret })
+```
+
+**理由**:
+- 業界標準のライブラリ
+- Google Authenticator、Authy、Microsoft Authenticatorと互換性
+- シンプルなAPI
+
+**代替案**:
+- ❌ **speakeasy**: 機能過多、複雑
+- ❌ **自作**: セキュリティリスク、RFC準拠が難しい
+
+### 4. 秘密鍵の暗号化: AES-256-GCM
+
+**決定**: TOTP秘密鍵をAES-256-GCMで暗号化してCosmosDBに保存
+
+```typescript
+import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
+
+class EncryptionService {
+  encrypt(text: string): string {
+    const iv = randomBytes(16);
+    const cipher = createCipheriv('aes-256-gcm', key, iv);
+    const encrypted = Buffer.concat([
+      cipher.update(text, 'utf8'),
+      cipher.final(),
+    ]);
+    const authTag = cipher.getAuthTag();
+
+    return JSON.stringify({
+      iv: iv.toString('hex'),
+      encryptedData: encrypted.toString('hex'),
+      authTag: authTag.toString('hex'),
+    });
+  }
+}
+```
+
+**理由**:
+- AES-256-GCMは業界標準の暗号化方式
+- 認証タグで改ざん検知
+- Node.js標準ライブラリで実装可能（追加依存なし）
+
+**代替案**:
+- ❌ **平文保存**: セキュリティリスク大
+- ❌ **AES-CBC**: 認証タグなし、改ざん検知不可
+
+### 5. レート制限: メモリベース（初期）
+
+**決定**: 初期はメモリベースのレート制限、将来的にRedis検討
+
+```typescript
+class RateLimiterService {
+  private attempts = new Map<string, number>();
+  private lockouts = new Map<string, Date>();
+
+  checkAttempt(userId: string): boolean {
+    const locked = this.lockouts.get(userId);
+    if (locked && locked > new Date()) {
+      throw new TooManyAttemptsException();
+    }
+
+    const count = this.attempts.get(userId) || 0;
+    if (count >= TOTP_MAX_ATTEMPTS) {
+      this.lockouts.set(userId, new Date(Date.now() + LOCKOUT_DURATION));
+      this.attempts.delete(userId);
+      throw new TooManyAttemptsException();
+    }
+
+    this.attempts.set(userId, count + 1);
+    return true;
+  }
+}
+```
+
+**理由**:
+- シンプル、追加インフラ不要
+- 個人利用レベルでは十分
+- 必要に応じてRedisに移行可能
+
+**代替案**:
+- ❌ **Redis**: コスト増、インフラ複雑化
+- ❌ **レート制限なし**: セキュリティリスク
+
+### 6. ユーザーデータモデル: CosmosDB
+
+**決定**: CosmosDBにUserエンティティを作成、partitionKeyは`userId`
+
+```typescript
+@Entity('users')
 export class User {
-  // Existing fields
-  id: string;
-  googleId: string;
+  @PartitionKey()
+  id: string;                    // UUID
+
   email: string;
   name: string;
-  picture?: string;
+  googleId: string;              // unique index
+
+  // TOTP関連
+  totpSecret: string;            // 暗号化済み
+  twoFactorEnabled: boolean;
+  twoFactorSetupComplete: boolean;
+
   createdAt: Date;
   updatedAt: Date;
-
-  // NEW: 2FA fields
-  totpSecret?: string;            // Encrypted TOTP secret (base32)
-  twoFactorEnabled: boolean;      // Always true (mandatory)
-  twoFactorSetupComplete: boolean; // Setup completed flag
-  totpSetupDate?: Date;           // When 2FA was setup
-  totpLastVerified?: Date;        // Last successful verification
-
-  // Future: Backup codes
-  // backupCodes?: string[];      // Hashed backup codes
 }
 ```
 
-### TOTP Secret Encryption
+**インデックス**:
+- `googleId`: unique index（OAuth検索用）
+- `email`: index（メール検索用）
+
+**理由**:
+- CosmosDBの既存インフラ利用
+- partitionKeyでクエリ効率化
+- ユーザー数は少ない想定（低コスト）
+
+### 7. TODO データモデル拡張
+
+**決定**: TODO エンティティに`userId`を追加、partitionKeyは維持
 
 ```typescript
-// Encryption (AES-256-GCM)
-const encryptSecret = (secret: string, key: string): string => {
-  const iv = crypto.randomBytes(16);
-  const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(key, 'hex'), iv);
-  let encrypted = cipher.update(secret, 'utf8', 'hex');
-  encrypted += cipher.final('hex');
-  const authTag = cipher.getAuthTag().toString('hex');
-  return `${iv.toString('hex')}:${authTag}:${encrypted}`;
-};
+@Entity('todos')
+export class Todo {
+  @PartitionKey()
+  id: string;                    // UUID
 
-// Decryption
-const decryptSecret = (encryptedData: string, key: string): string => {
-  const [ivHex, authTagHex, encryptedHex] = encryptedData.split(':');
-  const decipher = crypto.createDecipheriv(
-    'aes-256-gcm',
-    Buffer.from(key, 'hex'),
-    Buffer.from(ivHex, 'hex')
-  );
-  decipher.setAuthTag(Buffer.from(authTagHex, 'hex'));
-  let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
-  decrypted += decipher.final('utf8');
-  return decrypted;
-};
-```
+  userId: string;                // 新規追加
 
-## TOTP Implementation
+  title: string;
+  description?: string;
+  status: TodoStatus;
+  priority: TodoPriority;
+  dueDate?: Date;
 
-### Secret Generation
-
-```typescript
-import { authenticator } from 'otplib';
-
-// Generate a base32 secret (Google Authenticator compatible)
-const secret = authenticator.generateSecret(); // e.g., "JBSWY3DPEHPK3PXP"
-```
-
-### QR Code Generation
-
-```typescript
-import { toDataURL } from 'qrcode';
-
-const generateQRCode = async (user: User, secret: string): Promise<string> => {
-  const otpauthUrl = authenticator.keyuri(
-    user.email,                    // Account name
-    'TODO App',                    // Issuer (from env: TOTP_ISSUER)
-    secret
-  );
-  // otpauthUrl example:
-  // "otpauth://totp/TODO%20App:user@example.com?secret=JBSWY3DPEHPK3PXP&issuer=TODO%20App"
-
-  const qrCodeDataUrl = await toDataURL(otpauthUrl);
-  return qrCodeDataUrl; // data:image/png;base64,iVBORw0KG...
-};
-```
-
-### TOTP Verification
-
-```typescript
-import { authenticator } from 'otplib';
-
-// Configure
-authenticator.options = {
-  window: 1,  // Accept ±1 time step (±30s)
-};
-
-// Verify
-const isValid = authenticator.verify({
-  token: userInputCode,  // 6-digit code from user
-  secret: decryptedSecret,
-});
-
-// With time-based check (current counter)
-const currentToken = authenticator.generate(decryptedSecret);
-```
-
-### Replay Attack Prevention
-
-使用済みTOTPコードのトラッキング：
-
-```typescript
-// Option 1: In-memory cache (simple, but lost on restart)
-const usedTokens = new Set<string>(); // Format: "userId:token:counter"
-
-// Option 2: CosmosDB (persistent)
-interface UsedToken {
-  id: string;         // userId:token:counter
-  userId: string;
-  token: string;
-  counter: number;    // Time step counter
-  usedAt: Date;
-  ttl: number;        // CosmosDB TTL (60 seconds)
-}
-
-// Check before verification
-const tokenKey = `${userId}:${token}:${currentCounter}`;
-if (usedTokens.has(tokenKey)) {
-  throw new Error('Token already used');
-}
-
-// After successful verification
-usedTokens.add(tokenKey);
-
-// Cleanup old tokens (optional if using CosmosDB TTL)
-setTimeout(() => usedTokens.delete(tokenKey), 60000);
-```
-
-## Security Considerations
-
-### 1. Secret Key Security
-
-**生成**:
-- 暗号学的に安全な乱数生成器を使用（`crypto.randomBytes`）
-- 十分な長さ（160ビット以上、base32で26文字以上）
-
-**保存**:
-- 暗号化必須（AES-256-GCM）
-- 暗号化キーは環境変数で管理
-- データベースに平文で保存しない
-
-**転送**:
-- HTTPS必須
-- QRコードは一度だけ表示（セットアップ時）
-- シークレットキーのテキスト表示も一度のみ
-
-### 2. Rate Limiting
-
-```typescript
-// Rate limiting configuration
-interface RateLimitConfig {
-  maxAttempts: 5;           // 5回まで試行可能
-  windowSeconds: 300;       // 5分間
-  lockoutDuration: 1800;    // ロックアウト30分
-}
-
-// Implementation (pseudocode)
-const attempts = await getAttempts(userId, windowSeconds);
-if (attempts >= maxAttempts) {
-  if (isLockedOut(userId)) {
-    throw new TooManyAttemptsException('Account temporarily locked');
-  }
-  lockAccount(userId, lockoutDuration);
-  throw new TooManyAttemptsException('Too many failed attempts');
-}
-
-// Increment on failure
-await incrementAttempts(userId);
-
-// Reset on success
-await resetAttempts(userId);
-```
-
-### 3. Time Synchronization
-
-**問題**: サーバーとユーザーデバイスの時計がずれる可能性
-
-**解決策**:
-- `window` パラメータで±30秒の許容範囲を設定
-- システム時計をNTPで同期（サーバー側）
-- ユーザーにデバイスの時計確認を促す（エラー時）
-
-### 4. Backup Strategy
-
-現在の実装では含めないが、将来の拡張：
-
-```typescript
-// Generate 10 backup codes (8-character alphanumeric)
-const generateBackupCodes = (): string[] => {
-  const codes = [];
-  for (let i = 0; i < 10; i++) {
-    const code = crypto.randomBytes(4).toString('hex').toUpperCase();
-    codes.push(code);
-  }
-  return codes;
-};
-
-// Hash before storage
-const hashedCodes = codes.map(code => bcrypt.hashSync(code, 10));
-
-// Verify backup code
-const verifyBackupCode = (inputCode: string, hashedCodes: string[]): boolean => {
-  for (const hash of hashedCodes) {
-    if (bcrypt.compareSync(inputCode, hash)) {
-      // Remove used code
-      removeBackupCode(hash);
-      return true;
-    }
-  }
-  return false;
-};
-```
-
-## API Design
-
-### Endpoints
-
-```typescript
-// 1. Setup Initiation
-POST /api/auth/2fa/setup
-Request: { } (authenticated, temporary token)
-Response: {
-  success: true,
-  data: {
-    qrCode: "data:image/png;base64,...",
-    secret: "JBSWY3DPEHPK3PXP",  // For manual entry
-    issuer: "TODO App",
-    account: "user@example.com"
-  }
-}
-
-// 2. Setup Verification
-POST /api/auth/2fa/verify-setup
-Request: {
-  token: "123456"  // 6-digit TOTP code
-}
-Response: {
-  success: true,
-  message: "2FA setup completed"
-}
-
-// 3. Login TOTP Verification
-POST /api/auth/2fa/verify
-Request: {
-  token: "123456",
-  tempAuthToken: "temp-jwt-token"  // Temporary token from OAuth
-}
-Response: {
-  success: true,
-  data: {
-    accessToken: "jwt-access-token",  // Full JWT token
-    user: { /* user info */ }
-  }
-}
-
-// 4. Check 2FA Status
-GET /api/auth/2fa/status
-Response: {
-  success: true,
-  data: {
-    enabled: true,
-    setupComplete: true,
-    setupDate: "2024-01-15T10:30:00Z"
-  }
+  createdAt: Date;
+  updatedAt: Date;
 }
 ```
 
-### Error Responses
+**インデックス**:
+- `userId`: index（ユーザーごとのクエリ用）
 
-```typescript
-// Invalid TOTP code
-{
-  success: false,
-  error: {
-    code: "INVALID_TOTP",
-    message: "Invalid verification code",
-    statusCode: 401,
-    remainingAttempts: 3  // Optional
-  }
-}
+**理由**:
+- 既存のpartitionKey設計を変更しない
+- userIdでフィルタリング可能
 
-// Too many attempts
-{
-  success: false,
-  error: {
-    code: "TOO_MANY_ATTEMPTS",
-    message: "Account temporarily locked due to too many failed attempts",
-    statusCode: 429,
-    lockoutUntil: "2024-01-15T11:00:00Z"
-  }
-}
+## Risks / Trade-offs
 
-// Setup not complete
-{
-  success: false,
-  error: {
-    code: "2FA_SETUP_REQUIRED",
-    message: "Two-factor authentication setup is required",
-    statusCode: 403,
-    setupUrl: "/auth/2fa/setup"
-  }
-}
-```
+### リスク1: Google OAuth依存
 
-## Frontend Integration
+**リスク**: Googleサービス障害時にログインできない
 
-### 2FA Setup Flow
+**緩和策**:
+- 将来的に他のOAuthプロバイダー追加を検討（GitHub、Microsoft）
+- 現時点では許容（個人プロジェクト）
 
-```typescript
-// 1. Initiate setup
-const { qrCode, secret } = await fetch('/api/auth/2fa/setup', {
-  method: 'POST',
-  headers: { Authorization: `Bearer ${tempToken}` }
-}).then(r => r.json());
+### リスク2: TOTP秘密鍵の紛失
 
-// 2. Display QR code
-<Image src={qrCode} alt="Scan this QR code" />
-<p>Or manually enter: {secret}</p>
+**リスク**: ユーザーがAuthenticatorアプリを紛失した場合、ログイン不可
 
-// 3. User scans QR code with Google Authenticator
+**緩和策**:
+- Phase 2でバックアップコード実装
+- 管理者による手動リセット機能（緊急時）
 
-// 4. User enters 6-digit code
-const verifyResponse = await fetch('/api/auth/2fa/verify-setup', {
-  method: 'POST',
-  headers: { Authorization: `Bearer ${tempToken}` },
-  body: JSON.stringify({ token: userInput })
-});
+### リスク3: レート制限のメモリベース
 
-// 5. Setup complete, redirect to app
-```
+**リスク**: サーバー再起動でレート制限がリセットされる
 
-### 2FA Login Flow
+**緩和策**:
+- 初期は許容（低リスク）
+- 必要に応じてRedis/CosmosDB移行
 
-```typescript
-// After Google OAuth success
-const { requiresTwoFactor, tempToken } = oauthResponse;
+### トレードオフ1: ステートレス vs ステートフル
 
-if (requiresTwoFactor) {
-  // Show TOTP input screen
-  const totpCode = await showTotpInputModal();
+**選択**: ステートレス（JWT）
 
-  // Verify TOTP
-  const { accessToken } = await fetch('/api/auth/2fa/verify', {
-    method: 'POST',
-    body: JSON.stringify({ token: totpCode, tempAuthToken: tempToken })
-  }).then(r => r.json());
+- ✅ インフラコスト削減
+- ✅ スケーラブル
+- ⚠️ トークン無効化が困難（有効期限まで有効）
 
-  // Store full access token
-  localStorage.setItem('jwt_token', accessToken);
-}
-```
+**判断**: 個人プロジェクトかつ低コスト優先のため、ステートレスを選択
 
-## Testing Strategy
+### トレードオフ2: 2FA必須 vs オプション
 
-### Unit Tests
+**選択**: 2FA必須
 
-```typescript
-describe('TOTP Service', () => {
-  it('should generate a valid TOTP secret', () => {
-    const secret = totpService.generateSecret();
-    expect(secret).toMatch(/^[A-Z2-7]{16,}$/); // Base32 format
-  });
+- ✅ セキュリティ強化
+- ⚠️ 初回ログイン時の手間
 
-  it('should verify a valid TOTP code', () => {
-    const secret = 'JBSWY3DPEHPK3PXP';
-    const token = authenticator.generate(secret);
-    const isValid = totpService.verify(token, secret);
-    expect(isValid).toBe(true);
-  });
+**判断**: エンジニア向けアプリのため、2FA必須でも許容範囲
 
-  it('should reject an invalid TOTP code', () => {
-    const secret = 'JBSWY3DPEHPK3PXP';
-    const isValid = totpService.verify('000000', secret);
-    expect(isValid).toBe(false);
-  });
+## Migration Plan
 
-  it('should encrypt and decrypt secret correctly', () => {
-    const original = 'JBSWY3DPEHPK3PXP';
-    const encrypted = totpService.encryptSecret(original);
-    const decrypted = totpService.decryptSecret(encrypted);
-    expect(decrypted).toBe(original);
-  });
-});
-```
+**Phase 1: 基本認証（Google OAuth + TOTP）**:
+1. ユーザー管理モジュール作成
+2. Google OAuth統合
+3. TOTP二要素認証実装
+4. JWT認証ガード追加
+5. TODO APIに認証要件追加
+6. 既存TODOデータ移行（最初のユーザーに紐付け）
 
-### Integration Tests
+**Phase 2: セキュリティ強化（将来）**:
+1. バックアップコード実装
+2. レート制限のRedis移行
+3. WebAuthn対応検討
 
-```typescript
-describe('2FA Setup Flow', () => {
-  it('should complete 2FA setup successfully', async () => {
-    // 1. OAuth login
-    const tempToken = await authenticateWithGoogle();
+**Phase 3: UX改善（将来）**:
+1. 複数OAuthプロバイダー対応
+2. "Remember this device"機能
+3. セキュリティイベントログ
 
-    // 2. Initiate setup
-    const { secret, qrCode } = await request(app)
-      .post('/api/auth/2fa/setup')
-      .set('Authorization', `Bearer ${tempToken}`)
-      .expect(200);
+**ロールバック**:
+- 認証モジュール削除
+- TODO APIから認証ガード除去
+- TODOテーブルからuserId削除（または無視）
 
-    // 3. Generate TOTP code
-    const token = authenticator.generate(secret);
+## Open Questions
 
-    // 4. Verify setup
-    await request(app)
-      .post('/api/auth/2fa/verify-setup')
-      .set('Authorization', `Bearer ${tempToken}`)
-      .send({ token })
-      .expect(200);
+1. **既存TODOの移行方法**
+   - 最初にログインしたユーザーに全て紐付ける
+   - 移行スクリプトで手動割り当て
+   - → **決定**: 最初のユーザーに自動紐付け
 
-    // 5. Check user's 2FA status
-    const user = await userRepository.findById(userId);
-    expect(user.twoFactorSetupComplete).toBe(true);
-  });
-});
-```
+2. **開発環境での2FAバイパス**
+   - 環境変数でバイパス可能にする？
+   - → **決定**: `TOTP_BYPASS_FOR_TESTING=true`で可能
 
-### Manual Testing
+3. **CosmosDBパーティションキー設計**
+   - Userは`userId`、TODOは既存の`id`維持
+   - → **決定**: 既存設計を変更しない
 
-1. **セットアップテスト**
-   - Google OAuth認証
-   - QRコード表示確認
-   - Google Authenticatorでスキャン
-   - 生成されたコードで検証成功
-
-2. **ログインテスト**
-   - Google OAuth認証
-   - TOTP入力画面表示
-   - 正しいコード入力で成功
-   - 誤ったコード入力で失敗
-
-3. **セキュリティテスト**
-   - 5回失敗でロックアウト
-   - 同じコードの再利用不可
-   - 暗号化されたシークレットの確認（CosmosDB）
-
-## Deployment Considerations
-
-### Environment Variables
-
-```bash
-# Required
-TOTP_ENCRYPTION_KEY=64-character-hex-string  # 256-bit key
-TOTP_ISSUER="TODO App"
-
-# Optional (with defaults)
-TOTP_WINDOW=1
-TOTP_MAX_ATTEMPTS=5
-TOTP_LOCKOUT_DURATION=1800
-
-# For testing only
-TOTP_BYPASS_FOR_TESTING=false  # Set to true in dev environment
-```
-
-### Database Migration
-
-既存ユーザーへの対応：
-
-```typescript
-// Migration script
-async function migrate2FA() {
-  const users = await userRepository.findAll();
-
-  for (const user of users) {
-    user.twoFactorEnabled = true;
-    user.twoFactorSetupComplete = false;  // Require setup on next login
-    await userRepository.update(user);
-  }
-
-  console.log(`Migrated ${users.length} users to require 2FA`);
-}
-```
-
-## Performance Impact
-
-| Operation | Latency | Notes |
-|-----------|---------|-------|
-| Secret Generation | <10ms | One-time per user |
-| QR Code Generation | 50-100ms | One-time per user |
-| Encryption | <5ms | One-time per user |
-| Decryption | <5ms | Every login |
-| TOTP Verification | <1ms | HMAC computation (fast) |
-| Rate Limit Check | <10ms | CosmosDB query |
-
-**Total overhead per login**: ~20-30ms (negligible)
-
-## Risks & Mitigations
-
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| User loses device | High | Implement backup codes (Phase 2) |
-| Time drift | Medium | Use window=1 for ±30s tolerance |
-| Secret key leak | Critical | Encryption at rest, HTTPS in transit |
-| Rate limit bypass | Medium | Server-side validation, IP-based throttling |
-| Replay attacks | Medium | Track used tokens with TTL |
-
----
-
-**Implementation Priority**: High (Security-critical feature)
-**Dependencies**: `add-user-authentication` must be completed first
-**Estimated Effort**: 3-5 days (backend + frontend)
+4. **JWTトークンの有効期限**
+   - 一時トークン: 10分
+   - 本トークン: 7日
+   - → **決定**: 上記で確定

@@ -1,208 +1,221 @@
-# Change Proposal: Add Two-Factor Authentication (TOTP)
+# Change Proposal: Add Two-Factor Authentication
 
 ## Why
 
-現在、Google OAuth認証の実装が進行中ですが、単一要素認証（Google OAuth のみ）では以下のセキュリティリスクがあります：
+現在、TODOアプリには認証機能が実装されていません。エンジニア向けのタスク管理アプリとして、以下のセキュリティ要件を満たす必要があります：
 
-1. **アカウント乗っ取りリスク**: Googleアカウントが侵害された場合、TODOアプリへの不正アクセスも許可される
-2. **セッション盗聴**: JWTトークンが漏洩した場合、攻撃者が認証済みユーザーとして振る舞える
-3. **セキュリティ基準の不足**: 個人情報を扱うアプリケーションとして二要素認証は業界標準
-4. **エンジニア向けアプリとしての要求**: ターゲットユーザーはセキュリティ意識の高いエンジニアであり、2FAは期待される機能
+1. **ユーザー認証**: Google OAuth を使用した安全なユーザー認証
+2. **データ分離**: ユーザーごとにTODOデータを完全に分離
+3. **セキュリティ強化**: 二要素認証(TOTP)による追加のセキュリティレイヤー
 
-エンジニア向けTODOリストアプリとして、TOTP（Time-based One-Time Password）を使用した二要素認証を**必須**で実装し、セキュリティを強化します。
+Google OAuth単独では、Googleアカウントが侵害された場合やセッショントークンが漏洩した場合のリスクが残ります。TOTP二要素認証を追加することで、以下を実現します：
+
+- **アカウント乗っ取り防止**: 認証情報漏洩時の追加防御層
+- **業界標準のセキュリティ**: エンジニア向けアプリとしての期待に応える
+- **セッション保護**: トークン漏洩時のリスク軽減
 
 ## What Changes
 
-### TOTP二要素認証の実装
+### 認証システムの全体構成
 
-- **TOTP秘密鍵の管理**
-  - ユーザーごとに一意のTOTP秘密鍵を生成
-  - QRコードとシークレットキーの両方を提供
-  - 秘密鍵は暗号化してCosmosDBに保存
+**Google OAuth認証 + TOTP二要素認証**の組み合わせで実装：
 
-- **TOTP検証**
-  - `otplib`ライブラリを使用してTOTP生成と検証
-  - 30秒の時間ウィンドウ
-  - 1ステップの時間差を許容（時計のずれ対応）
-
-- **2FA セットアッププロセス**
-  - 初回ログイン後、2FA設定が必須
-  - QRコードを表示（Google Authenticator等でスキャン）
-  - バックアップキーの表示と保存を促す
-  - 検証コード入力で設定完了
-
-### Userエンティティの拡張
-
-- **2FA関連フィールドの追加**
-  - `totpSecret`: TOTP秘密鍵（暗号化）
-  - `twoFactorEnabled`: 2FA有効/無効フラグ（常にtrue、必須のため）
-  - `twoFactorSetupComplete`: セットアップ完了フラグ
-  - `backupCodes`: バックアップコードのハッシュ配列（オプション、将来実装）
-
-### 認証フローの変更
-
-**現在のフロー（OAuth のみ）**:
 ```
-1. Google OAuth認証 → 2. JWTトークン発行 → 3. ログイン完了
-```
-
-**新しいフロー（OAuth + 2FA）**:
-```
-1. Google OAuth認証
+1. Google OAuth認証（第一要素）
+   ↓
 2. 2FAセットアップ確認
-   - 未設定 → 2FA セットアップ画面へ
+   - 未設定 → セットアップ画面へ
    - 設定済 → TOTP検証画面へ
-3. TOTP検証
-   - 成功 → JWTトークン発行 → ログイン完了
-   - 失敗 → エラー表示、再試行可能
+   ↓
+3. TOTP検証（第二要素）
+   ↓
+4. JWTトークン発行
+   ↓
+5. 認証完了
 ```
+
+### 新規機能
+
+#### 1. Google OAuth認証
+- NestJS Passportを使用したGoogle OAuth2.0連携
+- ユーザープロフィール情報の取得と保存
+- 初回ログイン時のユーザー自動作成
+
+#### 2. TOTP二要素認証
+- `otplib`を使用したTOTP生成・検証
+- QRコードとシークレットキーの提供
+- 30秒時間ウィンドウ、1ステップ許容
+
+#### 3. ユーザー管理
+- ユーザーエンティティの作成
+- TOTP秘密鍵の暗号化保存
+- ユーザーごとのTODOデータ分離
+
+#### 4. セキュリティ機能
+- JWTトークンベースのセッション管理
+- レート制限（5回/5分）
+- 秘密鍵のAES-256-GCM暗号化
 
 ### 新規APIエンドポイント
 
+**OAuth認証**:
+- `GET /api/auth/google` - Google OAuth開始
+- `GET /api/auth/google/callback` - OAuth コールバック
+- `POST /api/auth/logout` - ログアウト
+
 **2FA セットアップ**:
-- `POST /api/auth/2fa/setup` - 2FAセットアップ開始（QRコード生成）
-- `POST /api/auth/2fa/verify-setup` - セットアップ時のTOTP検証
-- `POST /api/auth/2fa/complete-setup` - 2FAセットアップ完了
+- `POST /api/auth/2fa/setup` - 2FAセットアップ開始
+- `POST /api/auth/2fa/verify-setup` - セットアップ検証
+- `GET /api/auth/2fa/status` - 2FA状態確認
 
 **2FA ログイン**:
-- `POST /api/auth/2fa/verify` - ログイン時のTOTP検証
-- `GET /api/auth/2fa/status` - 2FA設定状態の確認
+- `POST /api/auth/2fa/verify` - TOTP検証
 
-**2FA 管理（将来実装）**:
-- `POST /api/auth/2fa/disable` - 2FA無効化（管理者のみ、またはバックアップコード必須）
-- `POST /api/auth/2fa/regenerate` - 秘密鍵の再生成
+**ユーザー管理**:
+- `GET /api/users/me` - 現在のユーザー情報取得
+- `PUT /api/users/me` - ユーザー情報更新
 
-### セキュリティ強化
+### データモデル
 
-- **秘密鍵の暗号化**
-  - AES-256-GCMで暗号化してCosmosDBに保存
-  - 暗号化キーは環境変数`TOTP_ENCRYPTION_KEY`で管理
+#### User エンティティ
+```typescript
+{
+  id: string;                    // UUID
+  email: string;                 // Google アカウントメール
+  name: string;                  // 表示名
+  googleId: string;              // Google ユーザーID
+  totpSecret: string;            // TOTP秘密鍵（暗号化）
+  twoFactorEnabled: boolean;     // 2FA有効フラグ
+  twoFactorSetupComplete: boolean; // セットアップ完了フラグ
+  createdAt: Date;
+  updatedAt: Date;
+}
+```
 
-- **レート制限**
-  - TOTP検証に失敗回数制限（5回/5分）
-  - 連続失敗でアカウント一時ロック（30分）
+### 既存機能への影響
 
-- **検証コードの使い捨て**
-  - 一度使用したTOTPコードは再利用不可（Replay Attack対策）
-  - 使用済みコードをキャッシュ（Redis または CosmosDB）
-
-- **セッション管理の強化**
-  - 2FA検証前は一時トークン（短時間有効）のみ発行
-  - 2FA検証後に本トークン発行
+**TODO API**:
+- 全エンドポイントにJWT認証ガードを追加
+- TODO エンティティに`userId`フィールド追加
+- ユーザーごとのデータフィルタリング
 
 ### 環境変数の追加
 
-- `TOTP_ENCRYPTION_KEY`: TOTP秘密鍵の暗号化キー（256ビット）
-- `TOTP_ISSUER`: TOTP発行者名（アプリ名、例: "TODO App"）
-- `TOTP_WINDOW`: 時間ウィンドウ（デフォルト: 1）
-- `TOTP_MAX_ATTEMPTS`: 最大試行回数（デフォルト: 5）
-- `TOTP_LOCKOUT_DURATION`: ロックアウト時間（秒、デフォルト: 1800）
+```
+# Google OAuth
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_CALLBACK_URL=
+
+# JWT
+JWT_SECRET=
+JWT_EXPIRATION=7d
+
+# TOTP
+TOTP_ENCRYPTION_KEY=
+TOTP_ISSUER="TODO App"
+TOTP_WINDOW=1
+TOTP_MAX_ATTEMPTS=5
+TOTP_LOCKOUT_DURATION=1800
+```
 
 ## Impact
 
 ### 新規追加される仕様
 
-- `specs/two-factor-auth/` - TOTP二要素認証の要件とシナリオ
+- `specs/user-auth/spec.md` - 認証フロー全体
+- `specs/user-management/spec.md` - ユーザー管理
+- `specs/two-factor-auth/spec.md` - TOTP二要素認証
 
 ### 変更される仕様
 
-- `specs/user-auth/` - 認証フローに2FA検証ステップを追加
-  - OAuth認証成功後、2FAセットアップまたは検証が必須
-  - JWTトークン発行は2FA検証後のみ
-
-- `specs/user-management/` - Userエンティティに2FA関連フィールドを追加
-  - `totpSecret`, `twoFactorEnabled`, `twoFactorSetupComplete` フィールド
+- `specs/todo-api/spec.md` - 全エンドポイントに認証要件を追加
 
 ### 影響を受けるコード
 
-- `application/backend/src/modules/auth/`
-  - `auth.service.ts` - 2FA検証ロジック追加
-  - `auth.controller.ts` - 2FA関連エンドポイント追加
-  - `strategies/jwt.strategy.ts` - 2FA検証状態の確認
+**新規作成**:
+- `application/backend/src/modules/auth/` - 認証モジュール
+- `application/backend/src/modules/users/` - ユーザー管理モジュール
+- `application/backend/src/common/guards/jwt-auth.guard.ts`
+- `application/backend/src/common/guards/totp-verified.guard.ts`
+- `application/backend/src/common/decorators/current-user.decorator.ts`
 
-- `application/backend/src/modules/users/`
-  - `entities/user.entity.ts` - 2FA関連フィールド追加
-  - `users.service.ts` - TOTP秘密鍵の生成・暗号化ロジック
+**変更**:
+- `application/backend/src/modules/todos/entities/todo.entity.ts` - userId追加
+- `application/backend/src/modules/todos/todos.controller.ts` - 認証ガード追加
+- `application/backend/src/modules/todos/todos.service.ts` - ユーザーフィルタリング追加
 
-- `application/backend/src/common/`
-  - `guards/totp-verified.guard.ts` - 新規作成（2FA検証済みガード）
-  - `decorators/totp-verified.decorator.ts` - 新規作成
-
-- `application/backend/package.json`
-  - 依存関係追加: `otplib`, `qrcode`, `crypto-js` または `@nestjs/cryptography`
+**依存関係追加**:
+- `@nestjs/passport`
+- `passport`
+- `passport-google-oauth20`
+- `@nestjs/jwt`
+- `otplib`
+- `qrcode`
 
 ### フロントエンドへの影響
 
-- **2FAセットアップ画面の追加**
-  - QRコード表示
-  - シークレットキー表示（手動入力用）
-  - 検証コード入力フォーム
-  - バックアップキー表示（将来実装）
+- Google OAuthログインボタン
+- 2FAセットアップ画面（QRコード表示）
+- 2FAログイン画面（TOTP入力）
+- ユーザープロフィール表示
+- 認証状態管理
 
-- **2FAログイン画面の追加**
-  - TOTP検証コード入力フォーム
-  - エラーメッセージ表示
-  - 残り試行回数の表示（オプション）
+### 破壊的変更
 
-- **認証フローの変更**
-  - Google OAuth認証後、2FA画面へリダイレクト
-  - 2FA検証成功後にJWTトークン取得
-
-### 開発環境への影響
-
-- Google Authenticatorまたは類似アプリ（Authy、Microsoft Authenticator等）が必要
-- テスト用のTOTP検証ツールまたはモックが必要
-
-### 互換性
-
-- **破壊的変更**: 既存ユーザーは次回ログイン時に2FAセットアップが必須
-- 既存のJWTトークンは引き続き有効（有効期限まで）
-- 新規ログインは2FA検証必須
-
-### パフォーマンスへの影響
-
-- TOTP検証: 軽量な計算（HMACベース）、パフォーマンス影響は最小限
-- 暗号化/復号化: 秘密鍵の暗号化は初回セットアップ時のみ
-- レート制限: Redisまたは CosmosDB でカウンター管理（軽量）
+- **既存のTODOデータ**: 既存TODOは最初にログインしたユーザーに紐付ける必要がある
+- **API認証**: 全TODO APIエンドポイントが認証必須になる
 
 ## Success Criteria
 
-- ユーザーはGoogle OAuth認証後、2FAセットアップが必須
-- QRコードをスキャンしてGoogle Authenticatorに登録できる
-- 正しいTOTPコードで認証に成功する
-- 誤ったTOTPコードで認証が拒否される
+**Google OAuth認証**:
+- ユーザーはGoogleアカウントでログインできる
+- 初回ログイン時、ユーザーレコードが自動作成される
+- OAuth成功後、一時トークンが発行される
+
+**TOTP二要素認証**:
+- 初回ログイン後、2FAセットアップが必須
+- QRコードをスキャンしてAuthenticatorアプリに登録できる
+- 正しいTOTPコードで認証成功する
+- 誤ったコードで認証が拒否される
 - 5回連続失敗でアカウントが一時ロックされる
-- 2FA検証なしではJWTトークンが発行されない
-- 既に使用したTOTPコードは再利用できない
-- 秘密鍵がCosmosDBに暗号化されて保存される
-- Swagger UIで2FA関連エンドポイントがドキュメント化される
+
+**セキュリティ**:
+- TOTP秘密鍵が暗号化されてCosmosDBに保存される
+- 使用済みTOTPコードは再利用できない
+- JWTトークンは2FA検証後のみ発行される
+
+**TODO API統合**:
+- 全TODO APIエンドポイントが認証を要求する
+- ユーザーは自分のTODOのみアクセスできる
+- 他ユーザーのTODOは取得・変更できない
+
+**ドキュメント**:
+- Swagger UIで全エンドポイントがドキュメント化される
+- 認証フローが明確に説明される
 
 ## Open Questions
 
-1. **バックアップコード（リカバリーコード）の実装**
-   - 初期実装に含めるか、後から追加するか？
-   - **決定**: 将来実装（Phase 2）。まずTOTPのみ実装
+1. **既存TODOデータの移行**
+   - 認証実装前に作成されたTODOをどのユーザーに紐付けるか？
+   - **提案**: 最初にログインしたユーザーに全て紐付ける
 
-2. **複数デバイスでの2FA**
-   - 同じ秘密鍵を複数デバイスで使用可能にする？
-   - **決定**: 可能（QRコードとシークレットキーを提供）
+2. **2FA必須化のタイミング**
+   - 初回実装から必須にするか、オプションから開始するか？
+   - **提案**: 最初から必須（セキュリティ優先）
 
-3. **2FA無効化の方法**
-   - 管理者権限が必要か、ユーザー自身で可能か？
-   - **決定**: 2FA必須のため、基本的に無効化不可。緊急時は管理者介入
+3. **バックアップコード**
+   - 初期実装に含めるか？
+   - **提案**: Phase 2で実装（まずTOTPのみ）
 
 4. **テスト環境での2FA**
-   - テスト環境で2FAをバイパスする仕組みが必要か？
-   - **決定**: 環境変数`TOTP_BYPASS_FOR_TESTING=true`でバイパス可能（開発環境のみ）
+   - 開発・テスト時に2FAをバイパスする仕組みが必要か？
+   - **提案**: 環境変数`TOTP_BYPASS_FOR_TESTING=true`でバイパス可能
 
 ## Dependencies
 
-- **前提条件**: `add-user-authentication` 変更が完了している必要がある
-  - Google OAuth認証
-  - Userエンティティ
-  - JWTトークン管理
+なし（新規機能）
 
 ## Related Changes
 
-- `add-user-authentication`: 基本的な認証機能（前提条件）
-- 将来の拡張: バックアップコード、SMS認証（オプション）、WebAuthn（FIDO2）
+- 将来の拡張: バックアップコード、WebAuthn対応

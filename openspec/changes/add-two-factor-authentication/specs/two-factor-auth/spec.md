@@ -1,352 +1,181 @@
-# Spec Delta: two-factor-auth
+# two-factor-auth Specification Delta
 
 ## ADDED Requirements
 
-### Requirement: TOTP秘密鍵の生成と管理
+### Requirement: TOTP二要素認証セットアップ
 
-システムはユーザーごとに一意のTOTP秘密鍵を生成し、安全に管理しなければなりません(MUST)。
-
-#### Scenario: TOTP秘密鍵の生成
-
-- **WHEN** ユーザーが初めて2FAセットアップを開始する
-- **THEN** システムは暗号学的に安全な乱数生成器を使用してTOTP秘密鍵を生成する
-- **AND** 秘密鍵はbase32形式である
-- **AND** 秘密鍵の長さは最低26文字（160ビット）以上である
-
-#### Scenario: TOTP秘密鍵の暗号化保存
-
-- **WHEN** TOTP秘密鍵が生成される
-- **THEN** システムはAES-256-GCMアルゴリズムで秘密鍵を暗号化する
-- **AND** 暗号化キーは環境変数`TOTP_ENCRYPTION_KEY`から取得する
-- **AND** 暗号化された秘密鍵をCosmosDBに保存する
-- **AND** 平文の秘密鍵はデータベースに保存してはならない
-
-#### Scenario: TOTP秘密鍵の復号化
-
-- **WHEN** システムがTOTP検証のために秘密鍵が必要になる
-- **THEN** CosmosDBから暗号化された秘密鍵を取得する
-- **AND** 環境変数の暗号化キーを使用して復号化する
-- **AND** 復号化した秘密鍵をメモリ上でのみ使用する
-- **AND** 復号化した秘密鍵をログに出力してはならない
-
-### Requirement: QRコードの生成と表示
-
-システムは2FAセットアップ用のQRコードを生成しなければなりません(MUST)。
-
-#### Scenario: QRコード生成
-
-- **WHEN** ユーザーが2FAセットアップを開始する
-- **THEN** システムはTOTP秘密鍵からQRコードを生成する
-- **AND** QRコードは`otpauth://`スキームのURIを含む
-- **AND** URIにはアカウント名（ユーザーのメールアドレス）、発行者名、秘密鍵が含まれる
-- **AND** QRコードはdata URL形式（`data:image/png;base64,...`）で返される
-
-#### Scenario: QRコード表示
-
-- **WHEN** クライアントがQRコードを受け取る
-- **THEN** QRコードを画像として表示する
-- **AND** シークレットキーのテキストも表示する（手動入力用）
-- **AND** 発行者名とアカウント名を表示する
-- **AND** QRコードは一度のみ表示され、再表示はできない
-
-#### Scenario: QRコードの再表示防止
-
-- **WHEN** ユーザーが既に2FAセットアップを完了している
-- **THEN** QRコード生成エンドポイントへのアクセスは拒否される
-- **AND** エラーメッセージは`2FA setup already completed`
-
-### Requirement: TOTP検証
-
-システムは6桁のTOTPコードを検証しなければなりません(MUST)。
-
-#### Scenario: 正しいTOTPコードの検証成功
-
-- **WHEN** ユーザーが現在有効な6桁のTOTPコードを入力する
-- **THEN** システムはユーザーの秘密鍵を復号化する
-- **AND** 現在の時刻と秘密鍵を使用してTOTPコードを計算する
-- **AND** ユーザー入力と計算されたコードが一致する場合、検証成功とする
-- **AND** レスポンスステータスは200 OKである
-
-#### Scenario: 時計のずれを考慮したTOTP検証
-
-- **WHEN** ユーザーのデバイスとサーバーの時計が最大30秒ずれている
-- **THEN** システムは±1時間ステップ（±30秒）の範囲でTOTPコードを検証する
-- **AND** 前の時間ステップまたは次の時間ステップで生成されたコードも有効とする
-
-#### Scenario: 無効なTOTPコードの検証失敗
-
-- **WHEN** ユーザーが誤った6桁のコードを入力する
-- **THEN** システムは検証失敗とする
-- **AND** エラーメッセージ`Invalid verification code`を返す
-- **AND** レスポンスステータスは401 Unauthorizedである
-- **AND** 失敗回数をカウントする
-
-#### Scenario: 期限切れTOTPコードの検証失敗
-
-- **WHEN** ユーザーが60秒以上前のTOTPコードを入力する
-- **THEN** システムは検証失敗とする
-- **AND** エラーメッセージ`Code expired, please use a new code`を返す
-
-### Requirement: Replay Attack対策
-
-システムは一度使用したTOTPコードの再利用を防止しなければなりません(MUST)。
-
-#### Scenario: 使用済みTOTPコードの拒否
-
-- **WHEN** ユーザーが既に使用したTOTPコードを再度入力する
-- **THEN** システムは検証を拒否する
-- **AND** エラーメッセージ`Token already used`を返す
-- **AND** レスポンスステータスは401 Unauthorizedである
-
-#### Scenario: 使用済みトークンのトラッキング
-
-- **WHEN** TOTP検証が成功する
-- **THEN** システムは使用されたトークンをトラッキングする
-- **AND** トークンは`userId:token:counter`の形式でキャッシュする
-- **AND** トークンは60秒後に自動的に削除される（TTL）
-
-### Requirement: レート制限
-
-システムはTOTP検証の試行回数を制限しなければなりません(MUST)。
-
-#### Scenario: レート制限内のTOTP検証
-
-- **WHEN** ユーザーが5分間に5回未満のTOTP検証を試行する
-- **THEN** システムは検証を実行する
-- **AND** 残り試行回数をレスポンスに含める（オプション）
-
-#### Scenario: レート制限超過によるアカウントロック
-
-- **WHEN** ユーザーが5分間に5回TOTP検証に失敗する
-- **THEN** システムはアカウントを30分間ロックする
-- **AND** エラーメッセージ`Account temporarily locked due to too many failed attempts`を返す
-- **AND** レスポンスステータスは429 Too Many Requestsである
-- **AND** ロックアウト解除時刻を返す
-
-#### Scenario: ロックアウト中のTOTP検証拒否
-
-- **WHEN** ロックアウトされたユーザーがTOTP検証を試行する
-- **THEN** システムは検証を拒否する
-- **AND** エラーメッセージ`Account locked until <timestamp>`を返す
-- **AND** レスポンスステータスは429 Too Many Requestsである
-
-#### Scenario: ロックアウト解除
-
-- **WHEN** ロックアウト時間が経過する
-- **THEN** システムは自動的にアカウントのロックを解除する
-- **AND** 失敗回数をリセットする
-- **AND** ユーザーは再度TOTP検証を試行できる
-
-#### Scenario: 検証成功時の失敗回数リセット
-
-- **WHEN** TOTP検証が成功する
-- **THEN** システムは失敗回数カウンターをリセットする
-- **AND** ロックアウト状態を解除する
-
-### Requirement: 2FAセットアップフロー
-
-システムは初回ログイン時に2FAセットアップを強制しなければなりません(MUST)。
-
-#### Scenario: 初回ログイン時の2FAセットアップ強制
-
-- **WHEN** ユーザーがGoogle OAuth認証に成功する
-- **AND** ユーザーの`twoFactorSetupComplete`がfalseである
-- **THEN** システムは一時トークン（短時間有効）を発行する
-- **AND** 2FAセットアップページへのリダイレクトURLを返す
-- **AND** 完全なJWTトークンは発行しない
+システムはTOTP（Time-based One-Time Password）二要素認証のセットアップ機能を提供しなければなりません(MUST)。
 
 #### Scenario: 2FAセットアップ開始
 
-- **WHEN** ユーザーが一時トークンを持って2FAセットアップを開始する
-- **THEN** システムはTOTP秘密鍵を生成する
-- **AND** 秘密鍵を暗号化してCosmosDBに保存する
-- **AND** QRコードとシークレットキーを返す
+- **WHEN** 認証済みユーザーがPOST /api/auth/2fa/setupをリクエストする
+- **AND** twoFactorSetupCompleteがfalseである
+- **THEN** システムは新しいTOTP秘密鍵を生成する
+- **AND** QRコード用のotpauthURLを生成する
+- **AND** QRコードのData URLを返す
+- **AND** 秘密鍵（テキスト）を返す（手動入力用）
+- **AND** レスポンスステータスは200 OKである
+
+#### Scenario: 既に2FAセットアップ済みの場合のエラー
+
+- **WHEN** ユーザーがPOST /api/auth/2fa/setupをリクエストする
+- **AND** twoFactorSetupCompleteがtrueである
+- **THEN** システムは400 Bad Requestエラーを返す
+- **AND** エラーメッセージは"Two-factor authentication is already set up"である
 
 #### Scenario: 2FAセットアップ検証
 
-- **WHEN** ユーザーがQRコードをスキャンして生成されたTOTPコードを入力する
+- **WHEN** ユーザーがPOST /api/auth/2fa/verify-setupでTOTPコードを送信する
+- **AND** コードが生成された秘密鍵と一致する
 - **THEN** システムはTOTPコードを検証する
-- **AND** 検証成功時、`twoFactorSetupComplete`をtrueに更新する
-- **AND** `totpSetupDate`を現在時刻に設定する
-- **AND** セットアップ完了メッセージを返す
+- **AND** 検証成功時、秘密鍵をAES-256-GCMで暗号化する
+- **AND** 暗号化された秘密鍵をCosmosDBに保存する
+- **AND** twoFactorSetupCompleteをtrueに設定する
+- **AND** twoFactorEnabledをtrueに設定する
+- **AND** 本JWTトークン（有効期限7日）を発行する
 
-#### Scenario: 2FAセットアップ未完了でのログイン拒否
+#### Scenario: 2FAセットアップ検証失敗
 
-- **WHEN** ユーザーが2FAセットアップを完了せずにログインを試みる
-- **THEN** システムはログインを拒否する
-- **AND** エラーメッセージ`2FA setup required`を返す
-- **AND** レスポンスステータスは403 Forbiddenである
-- **AND** セットアップページへのリダイレクトURLを含める
+- **WHEN** ユーザーがPOST /api/auth/2fa/verify-setupで誤ったTOTPコードを送信する
+- **THEN** システムは400 Bad Requestエラーを返す
+- **AND** エラーメッセージは"Invalid verification code"である
+- **AND** セットアップは完了しない
 
-### Requirement: 2FAログインフロー
+### Requirement: TOTPログイン検証
 
-システムは2回目以降のログイン時に2FA検証を要求しなければなりません(MUST)。
+システムはログイン時のTOTP検証機能を提供しなければなりません(MUST)。
 
-#### Scenario: 2FAセットアップ完了ユーザーのログイン
+#### Scenario: TOTP検証成功
 
-- **WHEN** ユーザーがGoogle OAuth認証に成功する
-- **AND** ユーザーの`twoFactorSetupComplete`がtrueである
-- **THEN** システムは一時トークンを発行する
-- **AND** TOTP検証ページへのリダイレクトURLを返す
-- **AND** 完全なJWTトークンは発行しない
+- **WHEN** 認証済みユーザー（一時トークン）がPOST /api/auth/2fa/verifyでTOTPコードを送信する
+- **AND** twoFactorSetupCompleteがtrueである
+- **AND** コードが保存された秘密鍵と一致する
+- **THEN** システムはCosmosDBから暗号化された秘密鍵を取得する
+- **AND** 秘密鍵を復号化する
+- **AND** TOTPコードを検証する
+- **AND** 検証成功時、本JWTトークン（有効期限7日）を発行する
+- **AND** レスポンスステータスは200 OKである
 
-#### Scenario: ログイン時のTOTP検証成功
+#### Scenario: TOTP検証失敗
 
-- **WHEN** ユーザーが一時トークンと正しいTOTPコードを送信する
-- **THEN** システムはTOTPコードを検証する
-- **AND** 検証成功時、完全なJWTトークンを発行する
-- **AND** `totpLastVerified`を現在時刻に更新する
-- **AND** ユーザー情報とトークンを返す
+- **WHEN** ユーザーがPOST /api/auth/2fa/verifyで誤ったTOTPコードを送信する
+- **THEN** システムは400 Bad Requestエラーを返す
+- **AND** エラーメッセージは"Invalid verification code"である
+- **AND** 失敗回数がインクリメントされる
 
-#### Scenario: ログイン時のTOTP検証失敗
+#### Scenario: 2FAセットアップ未完了でのTOTP検証エラー
 
-- **WHEN** ユーザーが一時トークンと誤ったTOTPコードを送信する
-- **THEN** システムはTOTP検証を拒否する
-- **AND** エラーメッセージと残り試行回数を返す
-- **AND** 完全なJWTトークンは発行しない
+- **WHEN** ユーザーがPOST /api/auth/2fa/verifyをリクエストする
+- **AND** twoFactorSetupCompleteがfalseである
+- **THEN** システムは400 Bad Requestエラーを返す
+- **AND** エラーメッセージは"Two-factor authentication is not set up"である
 
-### Requirement: 一時トークン管理
+### Requirement: TOTP設定
 
-システムは2FA検証前の一時トークンを発行しなければなりません(MUST)。
+システムはTOTPを以下の設定で生成・検証しなければなりません(MUST)。
 
-#### Scenario: 一時トークンの発行
+#### Scenario: TOTP設定の検証
 
-- **WHEN** ユーザーがGoogle OAuth認証に成功する
-- **THEN** システムは有効期限5分の一時トークンを発行する
-- **AND** 一時トークンのペイロードには`userId`と`requiresTwoFactor: true`が含まれる
-- **AND** 一時トークンではTODO APIへのアクセスは不可
+- **WHEN** TOTPコードが生成または検証される
+- **THEN** 以下の設定が使用される:
+  - アルゴリズム: SHA1
+  - 桁数: 6桁
+  - 時間ウィンドウ: 30秒
+  - 許容ウィンドウ: 1ステップ（前後30秒許容）
+  - 発行者: "TODO App"（環境変数で設定可能）
 
-#### Scenario: 一時トークンの検証
+#### Scenario: QRコード生成
 
-- **WHEN** クライアントが一時トークンを使用して2FA関連エンドポイントにアクセスする
-- **THEN** システムは一時トークンの署名を検証する
-- **AND** 一時トークンの有効期限を確認する
-- **AND** `requiresTwoFactor`フラグを確認する
-- **AND** すべて有効な場合、リクエストを処理する
+- **WHEN** 2FAセットアップ時にQRコードが生成される
+- **THEN** QRコードは以下の形式のotpauthURLを含む:
+  - `otpauth://totp/TODO App:<email>?secret=<secret>&issuer=TODO App`
+- **AND** QRコードはData URL形式（image/png, base64）で返される
 
-#### Scenario: 一時トークンの有効期限切れ
+### Requirement: レート制限
 
-- **WHEN** 一時トークンの有効期限（5分）が切れる
-- **THEN** システムは一時トークンを拒否する
-- **AND** エラーメッセージ`Temporary token expired, please login again`を返す
-- **AND** レスポンスステータスは401 Unauthorizedである
+システムはTOTP検証に対してレート制限を適用しなければなりません(MUST)。
 
-#### Scenario: 一時トークンでのTODO APIアクセス拒否
+#### Scenario: 連続失敗のカウント
 
-- **WHEN** ユーザーが一時トークンを使用してTODO APIにアクセスする
-- **THEN** システムはアクセスを拒否する
-- **AND** エラーメッセージ`2FA verification required`を返す
-- **AND** レスポンスステータスは403 Forbiddenである
+- **WHEN** ユーザーがTOTP検証に失敗する
+- **THEN** システムは失敗回数をインクリメントする
+- **AND** 失敗回数は5分間保持される
 
-### Requirement: 2FA状態の確認
+#### Scenario: 最大試行回数超過でのアカウントロック
 
-システムはユーザーの2FA設定状態を確認するエンドポイントを提供しなければなりません(MUST)。
+- **WHEN** ユーザーが5回連続でTOTP検証に失敗する
+- **THEN** システムはアカウントを30分間ロックする
+- **AND** 429 Too Many Requestsエラーを返す
+- **AND** エラーメッセージは"Too many failed attempts. Account locked for 30 minutes"である
+
+#### Scenario: ロックアウト中のアクセス拒否
+
+- **WHEN** ロックアウト中のユーザーがTOTP検証を試みる
+- **THEN** システムは429 Too Many Requestsエラーを返す
+- **AND** エラーメッセージにロックアウト解除までの残り時間を含む
+
+#### Scenario: 検証成功時の失敗カウントリセット
+
+- **WHEN** ユーザーがTOTP検証に成功する
+- **THEN** システムは失敗回数をリセットする
+- **AND** ロックアウトがあれば解除する
+
+### Requirement: TOTP秘密鍵の暗号化
+
+システムはTOTP秘密鍵を暗号化して保存しなければなりません(MUST)。
+
+#### Scenario: 秘密鍵の暗号化
+
+- **WHEN** TOTP秘密鍵が保存される
+- **THEN** システムはAES-256-GCMで暗号化する
+- **AND** 16バイトのランダムなIV（初期化ベクトル）を生成する
+- **AND** 認証タグを含める
+- **AND** 暗号化データはJSON形式で保存される: `{iv, encryptedData, authTag}`
+
+#### Scenario: 秘密鍵の復号化
+
+- **WHEN** TOTP検証時に秘密鍵が必要になる
+- **THEN** システムはCosmosDBから暗号化データを取得する
+- **AND** AES-256-GCMで復号化する
+- **AND** 認証タグを検証する
+- **AND** 改ざんが検出された場合はエラーを返す
+
+#### Scenario: 暗号化キーの管理
+
+- **WHEN** システムが起動する
+- **THEN** 環境変数TOTP_ENCRYPTION_KEYから256ビットの暗号化キーを読み込む
+- **AND** キーが設定されていない場合はエラーで起動を中止する
+
+### Requirement: 2FA状態確認
+
+システムは現在の2FA設定状態を確認する機能を提供しなければなりません(MUST)。
 
 #### Scenario: 2FA状態の取得
 
 - **WHEN** 認証済みユーザーがGET /api/auth/2fa/statusをリクエストする
 - **THEN** システムは以下の情報を返す:
-  ```json
-  {
-    "success": true,
-    "data": {
-      "enabled": true,
-      "setupComplete": true,
-      "setupDate": "2024-01-15T10:30:00Z",
-      "lastVerified": "2024-01-20T08:15:00Z"
-    }
-  }
-  ```
-- **AND** レスポンスステータスは200 OK
+  - `twoFactorEnabled`: boolean
+  - `twoFactorSetupComplete`: boolean
+- **AND** レスポンスステータスは200 OKである
 
-#### Scenario: 未認証ユーザーの2FA状態確認拒否
+#### Scenario: 未認証ユーザーの2FA状態取得拒否
 
 - **WHEN** 未認証ユーザーがGET /api/auth/2fa/statusをリクエストする
-- **THEN** システムは401 Unauthorizedを返す
+- **THEN** システムは401 Unauthorizedエラーを返す
 
-### Requirement: エラーハンドリング
+### Requirement: 使用済みTOTPコードの再利用防止
 
-システムは2FA関連のエラーを統一された形式で返さなければなりません(MUST)。
+システムは一度使用したTOTPコードの再利用を防止しなければなりません(MUST)。
 
-#### Scenario: 無効なTOTPコードエラー
+#### Scenario: TOTPコードの使い捨て
 
-- **WHEN** TOTP検証が失敗する
-- **THEN** システムは以下の形式でエラーを返す:
-  ```json
-  {
-    "success": false,
-    "error": {
-      "code": "INVALID_TOTP",
-      "message": "Invalid verification code",
-      "statusCode": 401,
-      "remainingAttempts": 3
-    }
-  }
-  ```
+- **WHEN** ユーザーがTOTPコードで検証に成功する
+- **THEN** システムはそのコードを使用済みとしてマークする
+- **AND** 使用済みコードは60秒間キャッシュされる
 
-#### Scenario: レート制限エラー
+#### Scenario: 使用済みTOTPコードの再利用拒否
 
-- **WHEN** ユーザーがレート制限に達する
-- **THEN** システムは以下の形式でエラーを返す:
-  ```json
-  {
-    "success": false,
-    "error": {
-      "code": "TOO_MANY_ATTEMPTS",
-      "message": "Account temporarily locked due to too many failed attempts",
-      "statusCode": 429,
-      "lockoutUntil": "2024-01-15T11:00:00Z"
-    }
-  }
-  ```
-
-#### Scenario: 2FAセットアップ必須エラー
-
-- **WHEN** ユーザーが2FAセットアップを完了していない
-- **THEN** システムは以下の形式でエラーを返す:
-  ```json
-  {
-    "success": false,
-    "error": {
-      "code": "2FA_SETUP_REQUIRED",
-      "message": "Two-factor authentication setup is required",
-      "statusCode": 403,
-      "setupUrl": "/api/auth/2fa/setup"
-    }
-  }
-  ```
-
-### Requirement: テスト環境でのバイパス
-
-システムは開発環境でのテストを容易にするため、2FAをバイパスする機能を提供しなければなりません(MUST)。
-
-#### Scenario: テスト環境での2FAバイパス
-
-- **WHEN** 環境変数`TOTP_BYPASS_FOR_TESTING`がtrueに設定されている
-- **AND** `NODE_ENV`が`development`または`test`である
-- **THEN** システムは任意のTOTPコード（例: `000000`）を受け入れる
-- **AND** バイパスが有効であることをログに記録する
-
-#### Scenario: 本番環境での2FAバイパス無効化
-
-- **WHEN** 環境変数`NODE_ENV`が`production`である
-- **THEN** `TOTP_BYPASS_FOR_TESTING`の値に関わらず、バイパスは無効である
-- **AND** すべてのTOTP検証が正常に実行される
-
-### Requirement: Swagger API ドキュメント
-
-システムは2FA関連エンドポイントをSwagger UIでドキュメント化しなければなりません(MUST)。
-
-#### Scenario: Swagger UIでの2FAエンドポイント表示
-
-- **WHEN** 開発者がSwagger UI（/api/docs）にアクセスする
-- **THEN** 2FA関連エンドポイントが`2FA`タグでグループ化されて表示される
-- **AND** 各エンドポイントの説明、リクエスト形式、レスポンス形式が明記される
-- **AND** 認証が必要なエンドポイントには鍵アイコンが表示される
-
-#### Scenario: 2FAフローのドキュメント
-
-- **WHEN** 開発者がSwagger UIで2FA関連のドキュメントを参照する
-- **THEN** セットアップフローとログインフローの説明が含まれる
-- **AND** QRコードのサンプルレスポンスが表示される
-- **AND** エラーレスポンスの例が表示される
+- **WHEN** ユーザーが既に使用したTOTPコードで再度検証を試みる
+- **AND** コードがまだ有効期限内である
+- **THEN** システムは400 Bad Requestエラーを返す
+- **AND** エラーメッセージは"Code has already been used"である

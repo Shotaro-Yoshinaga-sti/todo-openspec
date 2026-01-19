@@ -1,233 +1,325 @@
-# Tasks: Add Two-Factor Authentication (TOTP)
+# Implementation Tasks: Add Two-Factor Authentication
 
-## 前提条件
+## Phase 1: 基盤セットアップ
 
-- `add-user-authentication` 変更が完了していること
-- Google OAuth認証が動作していること
-- Userエンティティが実装されていること
+### 1.1 依存関係のインストール
+- [ ] バックエンドに認証関連パッケージを追加
+  - `@nestjs/passport`, `passport`, `passport-google-oauth20`
+  - `@nestjs/jwt`
+  - `otplib`, `qrcode`
+- [ ] package.json更新後、`npm install`実行
+- [ ] TypeScript型定義パッケージのインストール確認
 
-## Phase 1: 基盤準備
+**検証**: `npm list`で依存関係が正しくインストールされていることを確認
 
-- [ ] **依存パッケージのインストール**
-  - `otplib` - TOTP生成と検証
-  - `qrcode` - QRコード生成
-  - `@nestjs/throttler` - レート制限（オプション）
-  - `@types/qrcode` - 型定義
-  - 検証: package.jsonに依存関係が追加され、`npm install`が成功する
+### 1.2 環境変数の設定
+- [ ] `.env.example`に必要な環境変数を追加
+  - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL`
+  - `JWT_SECRET`, `JWT_EXPIRATION`
+  - `TOTP_ENCRYPTION_KEY`, `TOTP_ISSUER`, `TOTP_WINDOW`, `TOTP_MAX_ATTEMPTS`, `TOTP_LOCKOUT_DURATION`
+- [ ] ローカル開発用`.env`ファイルの作成と設定
+- [ ] Google Cloud Consoleで OAuth 2.0 クライアントIDの作成
 
-- [ ] **環境変数の追加**
-  - `.env.example`に2FA関連の環境変数を追加
-  - `TOTP_ENCRYPTION_KEY` (256ビット、64文字のhex文字列)
-  - `TOTP_ISSUER` (アプリ名、例: "TODO App")
-  - `TOTP_WINDOW` (デフォルト: 1)
-  - `TOTP_MAX_ATTEMPTS` (デフォルト: 5)
-  - `TOTP_LOCKOUT_DURATION` (デフォルト: 1800秒)
-  - `TOTP_BYPASS_FOR_TESTING` (開発環境用、デフォルト: false)
-  - 検証: `.env.example`にすべての変数が記載されている
+**検証**: 環境変数が正しく読み込まれることを確認（console.log）
 
-- [ ] **Userエンティティの拡張**
-  - `src/modules/users/entities/user.entity.ts`を更新
-  - 新しいフィールドを追加: `totpSecret`, `twoFactorEnabled`, `twoFactorSetupComplete`, `totpSetupDate`, `totpLastVerified`
-  - 検証: エンティティが新しいフィールドを含む
+## Phase 2: ユーザー管理モジュール
 
-- [ ] **暗号化ユーティリティの作成**
-  - `src/common/utils/encryption.util.ts`を作成
-  - `encryptTOTPSecret(secret: string): string` メソッド
-  - `decryptTOTPSecret(encrypted: string): string` メソッド
-  - AES-256-GCM暗号化を使用
-  - 検証: ユニットテストで暗号化/復号化が正しく動作する
+### 2.1 Userエンティティの作成
+- [ ] `application/backend/src/modules/users/entities/user.entity.ts`を作成
+  - id, email, name, googleId, totpSecret, twoFactorEnabled, twoFactorSetupComplete, createdAt, updatedAt
+- [ ] CosmosDBデコレーター設定（partitionKey: id）
+- [ ] インデックス設定（googleId: unique, email: index）
 
-## Phase 2: TOTP サービスの実装
+**検証**: エンティティがTypeScriptエラーなくコンパイルされる
 
-- [ ] **TOTPServiceの作成**
-  - `src/modules/auth/services/totp.service.ts`を作成
-  - `generateSecret()`: TOTP秘密鍵生成
-  - `generateQRCode(user: User, secret: string)`: QRコード生成
-  - `verifyToken(token: string, secret: string)`: TOTP検証
-  - `checkReplayAttack(userId: string, token: string)`: Replay Attack チェック
-  - 検証: すべてのメソッドが正しく動作する
+### 2.2 Userリポジトリの作成
+- [ ] `application/backend/src/modules/users/users.repository.ts`を作成
+  - findByGoogleId, findByEmail, create, update メソッド
+- [ ] CosmosDB接続とCRUD操作の実装
 
-- [ ] **レート制限サービスの作成**
-  - `src/modules/auth/services/rate-limit.service.ts`を作成
-  - `incrementAttempts(userId: string)`: 失敗回数増加
-  - `getAttempts(userId: string)`: 失敗回数取得
-  - `resetAttempts(userId: string)`: 失敗回数リセット
-  - `lockAccount(userId: string, duration: number)`: アカウントロック
-  - `isLockedOut(userId: string)`: ロック状態確認
-  - 検証: レート制限が正しく動作する
+**検証**: ユニットテストまたは手動テストでCRUD操作が動作
 
-## Phase 3: 2FA エンドポイントの実装
+### 2.3 Usersサービスの作成
+- [ ] `application/backend/src/modules/users/users.service.ts`を作成
+  - ユーザー作成、取得、更新ロジック
+  - TOTP秘密鍵の暗号化・復号化ロジック
+- [ ] `EncryptionService`をusers.service.tsに統合またはユーティリティとして作成
 
-- [ ] **TwoFactorController の作成**
-  - `src/modules/auth/controllers/two-factor.controller.ts`を作成
-  - `POST /api/auth/2fa/setup` - セットアップ開始
-  - `POST /api/auth/2fa/verify-setup` - セットアップ検証
-  - `POST /api/auth/2fa/verify` - ログイン時の検証
-  - `GET /api/auth/2fa/status` - 状態確認
-  - 検証: すべてのエンドポイントがルーティングされる
+**検証**: サービスメソッドが正しくリポジトリを呼び出す
 
-- [ ] **TwoFactorServiceの作成**
-  - `src/modules/auth/services/two-factor.service.ts`を作成
-  - `initiateSetup(user: User)`: セットアップ開始ロジック
-  - `verifySetup(user: User, token: string)`: セットアップ検証
-  - `verifyLogin(user: User, token: string)`: ログイン検証
-  - `getStatus(user: User)`: 状態取得
-  - 検証: サービスが正しくロジックを実行する
+### 2.4 Usersコントローラーの作成
+- [ ] `application/backend/src/modules/users/users.controller.ts`を作成
+  - `GET /api/users/me`: 現在のユーザー情報取得
+  - `PUT /api/users/me`: ユーザー情報更新
+- [ ] JWT認証ガードを適用
 
-## Phase 4: 認証フローの変更
+**検証**: Swagger UIでエンドポイントが表示される
 
-- [ ] **AuthServiceの更新**
-  - `src/modules/auth/auth.service.ts`を更新
-  - OAuth成功後、2FA状態を確認
-  - `twoFactorSetupComplete`に応じて一時トークンを発行
-  - 完全なJWTトークンは2FA検証後のみ発行
-  - 検証: 認証フローが正しく動作する
+### 2.5 Usersモジュールの登録
+- [ ] `application/backend/src/modules/users/users.module.ts`を作成
+- [ ] `app.module.ts`にUsersModuleをインポート
 
-- [ ] **一時トークン用のDTOとガードの作成**
-  - `src/modules/auth/dto/temp-token-payload.dto.ts`を作成
-  - `src/modules/auth/guards/temp-token.guard.ts`を作成
-  - 一時トークンの検証ロジック
-  - `requiresTwoFactor`フラグの確認
-  - 検証: 一時トークンが正しく検証される
+**検証**: NestJSアプリが正常に起動する
 
-- [ ] **JWTトークンペイロードの拡張**
-  - `src/modules/auth/dto/jwt-payload.dto.ts`を更新
-  - `twoFactorVerified: boolean`フィールドを追加
-  - JWT戦略で2FA検証状態を確認
-  - 検証: トークンペイロードが正しく拡張される
+## Phase 3: 認証モジュール（Google OAuth）
 
-## Phase 5: Swagger ドキュメント更新
+### 3.1 Google OAuth戦略の実装
+- [ ] `application/backend/src/modules/auth/strategies/google.strategy.ts`を作成
+- [ ] PassportStrategyを継承してGoogle OAuth2.0設定
+- [ ] `validate`メソッドでユーザー検索または自動作成
 
-- [ ] **TwoFactorControllerのSwaggerデコレータ追加**
-  - `@ApiTags('2FA')`を追加
-  - 各エンドポイントに`@ApiOperation`, `@ApiResponse`を追加
-  - リクエスト/レスポンスのDTOを定義
-  - 検証: Swagger UIに2FAエンドポイントが表示される
+**検証**: Google OAuth戦略が正しく登録される
 
-- [ ] **2FAフローのドキュメント作成**
-  - Swagger UIの説明に2FAフローを追加
-  - セットアップフローとログインフローの図を含める
-  - 検証: ドキュメントが明確で理解しやすい
+### 3.2 JWT戦略の実装
+- [ ] `application/backend/src/modules/auth/strategies/jwt.strategy.ts`を作成
+- [ ] JWTペイロードの検証とユーザー情報抽出
+- [ ] twoFactorVerifiedフラグの確認
 
-## Phase 6: エラーハンドリング
+**検証**: JWT戦略が正しく登録される
 
-- [ ] **2FA関連エラークラスの作成**
-  - `src/modules/auth/exceptions/invalid-totp.exception.ts`
-  - `src/modules/auth/exceptions/too-many-attempts.exception.ts`
-  - `src/modules/auth/exceptions/2fa-setup-required.exception.ts`
-  - `src/modules/auth/exceptions/token-already-used.exception.ts`
-  - 検証: すべてのエラークラスが正しく動作する
+### 3.3 認証サービスの作成
+- [ ] `application/backend/src/modules/auth/auth.service.ts`を作成
+  - OAuth認証後のユーザー処理
+  - 一時トークン・本トークンの発行ロジック
+- [ ] JWTサービスの統合
 
-- [ ] **HttpExceptionFilterの更新**
-  - `src/common/filters/http-exception.filter.ts`を更新
-  - 2FA関連エラーコードを追加 (`INVALID_TOTP`, `TOO_MANY_ATTEMPTS`, `2FA_SETUP_REQUIRED`)
-  - 統一されたエラーレスポンス形式
-  - 検証: エラーレスポンスが仕様通りの形式
+**検証**: トークン発行ロジックが正しく動作
 
-## Phase 7: CosmosDB対応
+### 3.4 認証コントローラーの作成
+- [ ] `application/backend/src/modules/auth/auth.controller.ts`を作成
+  - `GET /api/auth/google`: Google OAuth開始
+  - `GET /api/auth/google/callback`: OAuthコールバック
+  - `POST /api/auth/logout`: ログアウト
+- [ ] GoogleAuthGuardの適用
 
-- [ ] **UserRepositoryの更新**
-  - `src/database/repositories/user.repository.ts`を更新
-  - 2FA関連フィールドのCRUD操作サポート
-  - `updateTwoFactorSetup(userId: string, data: Partial<User>)` メソッド追加
-  - 検証: リポジトリが2FAフィールドを正しく管理する
+**検証**: Swagger UIでエンドポイントが表示され、Google OAuthフローが動作
 
-- [ ] **使用済みトークンの管理（オプション: CosmosDB使用）**
-  - `src/database/repositories/used-token.repository.ts`を作成（オプション）
-  - CosmosDBでTTL（60秒）を設定した使用済みトークン管理
-  - または、インメモリキャッシュ（Setまたはmap）を使用
-  - 検証: 使用済みトークンが正しく追跡される
+### 3.5 認証ガードの作成
+- [ ] `application/backend/src/common/guards/jwt-auth.guard.ts`を作成
+- [ ] `application/backend/src/common/guards/totp-verified.guard.ts`を作成
+  - twoFactorVerifiedフラグを確認
 
-## Phase 8: フロントエンド対応（参考）
+**検証**: ガードが未認証リクエストを拒否
 
-フロントエンド実装は別タスクですが、バックエンドAPIが対応すべき項目：
+### 3.6 カスタムデコレーターの作成
+- [ ] `application/backend/src/common/decorators/current-user.decorator.ts`を作成
+  - リクエストから現在のユーザー情報を抽出
 
-- [ ] **2FAセットアップ画面用のAPIレスポンス**
-  - QRコードのdata URL
-  - シークレットキーのテキスト
-  - 発行者名とアカウント名
-  - 検証: フロントエンドが必要な情報を取得できる
+**検証**: コントローラーでデコレーターが動作
 
-- [ ] **2FAログイン画面用のAPIレスポンス**
-  - TOTP検証エラー時の残り試行回数
-  - ロックアウト時のロック解除時刻
-  - 検証: フロントエンドがユーザーに適切な情報を表示できる
+### 3.7 認証モジュールの登録
+- [ ] `application/backend/src/modules/auth/auth.module.ts`を作成
+- [ ] `app.module.ts`にAuthModuleをインポート
+- [ ] PassportModuleとJwtModuleの設定
 
-## Phase 9: テスト
+**検証**: NestJSアプリが正常に起動し、Google OAuthでログイン可能
 
-- [ ] **TOTPServiceのユニットテスト**
-  - `totp.service.spec.ts`を作成
-  - 秘密鍵生成、QRコード生成、TOTP検証のテスト
-  - 検証: すべてのテストが成功する
+## Phase 4: 二要素認証（TOTP）
 
-- [ ] **2FA認証フローのE2Eテスト**
-  - `test/2fa.e2e-spec.ts`を作成
-  - セットアップフローの完全テスト
-  - ログインフローの完全テスト
-  - エラーケースのテスト（無効なコード、レート制限等）
-  - 検証: E2Eテストが成功する
+### 4.1 TOTPサービスの作成
+- [ ] `application/backend/src/modules/auth/services/totp.service.ts`を作成
+  - TOTP秘密鍵の生成
+  - QRコードのData URL生成
+  - TOTPコードの検証
+  - 使用済みコードキャッシュ（Replay Attack対策）
 
-- [ ] **レート制限のテスト**
-  - 5回連続失敗でロックアウト
-  - ロックアウト解除のテスト
-  - 検証: レート制限が正しく動作する
+**検証**: TOTP生成・検証ロジックが正しく動作
 
-- [ ] **Replay Attack防止のテスト**
-  - 同じTOTPコードの再利用テスト
-  - 検証: 使用済みコードが拒否される
+### 4.2 レート制限サービスの作成
+- [ ] `application/backend/src/modules/auth/services/rate-limiter.service.ts`を作成
+  - 失敗回数のカウント（メモリベース）
+  - アカウントロックアウト管理
+  - リセットロジック
 
-## Phase 10: ドキュメントとデプロイ準備
+**検証**: レート制限が5回失敗後にアカウントをロック
 
-- [ ] **READMEの更新**
-  - `application/backend/README.md`を更新
-  - 2FAセットアップ手順を追加
-  - 環境変数の説明を追加
-  - Google Authenticatorの使い方を追加
-  - 検証: READMEが明確で新しい開発者が理解できる
+### 4.3 2FA関連エンドポイントの追加
+- [ ] auth.controller.tsに以下を追加
+  - `POST /api/auth/2fa/setup`: 2FAセットアップ開始
+  - `POST /api/auth/2fa/verify-setup`: セットアップ時のTOTP検証
+  - `POST /api/auth/2fa/verify`: ログイン時のTOTP検証
+  - `GET /api/auth/2fa/status`: 2FA状態確認
+- [ ] 各エンドポイントに適切なガードを適用
 
-- [ ] **マイグレーション計画**
-  - 既存ユーザーへの対応方法をドキュメント化
-  - 次回ログイン時に2FAセットアップ強制
-  - 検証: マイグレーション計画が明確
+**検証**: Swagger UIでエンドポイントが表示され、2FAフローが動作
 
-- [ ] **環境変数の設定確認**
-  - `TOTP_ENCRYPTION_KEY`の生成方法をドキュメント化
-  - 本番環境での環境変数設定を確認
-  - 検証: すべての必要な環境変数が設定されている
+### 4.4 2FA統合テスト
+- [ ] Google Authenticatorアプリで2FAセットアップをテスト
+- [ ] TOTPコードでログイン検証をテスト
+- [ ] 誤ったコードで認証拒否をテスト
+- [ ] レート制限とロックアウトをテスト
 
-- [ ] **統合テストと検証**
-  - ローカル環境で完全な2FAフローをテスト
-  - Google Authenticatorでの実機テスト
-  - エラーケースの確認
-  - 検証: すべての機能が正常に動作する
+**検証**: 全ての2FAシナリオが正しく動作
 
-## Dependencies
+## Phase 5: TODO API統合
 
-- **Phase 2** はPhase 1に依存
-- **Phase 3** はPhase 2に依存
-- **Phase 4** はPhase 3に依存
-- **Phase 5-6** はPhase 4に依存
-- **Phase 9** はPhase 1-8に依存
-- **Phase 10** はPhase 1-9に依存
+### 5.1 TODOエンティティの拡張
+- [ ] `application/backend/src/modules/todos/entities/todo.entity.ts`にuserIdフィールド追加
+- [ ] userIdインデックスをCosmosDBに設定
 
-## Parallel Work Opportunities
+**検証**: エンティティがコンパイルエラーなく動作
 
-- Phase 1のタスク（依存パッケージ、環境変数、エンティティ拡張）は並行可能
-- Phase 2のTOTPServiceとレート制限サービスは並行可能
-- Phase 5（Swagger）とPhase 6（エラーハンドリング）は部分的に並行可能
-- Phase 9のテストタスクは並行可能
+### 5.2 TODO DTOの更新
+- [ ] `create-todo.dto.ts`からuserIdを除外（自動設定）
+- [ ] `update-todo.dto.ts`でuserIdを更新不可に設定
 
-## Estimated Effort
+**検証**: DTOバリデーションが正しく動作
 
-- **Phase 1-2**: 1日
-- **Phase 3-4**: 1.5日
-- **Phase 5-7**: 0.5日
-- **Phase 8-10**: 1日
+### 5.3 TODOサービスの更新
+- [ ] `todos.service.ts`の全メソッドにuserIdフィルタリング追加
+  - findAll: userIdでフィルタ
+  - findOne: userIdと一致確認
+  - create: userIdを自動設定
+  - update: userIdと一致確認
+  - remove: userIdと一致確認
 
-**合計**: 約4日（バックエンドのみ）
+**検証**: ユーザーは自分のTODOのみアクセス可能
 
-## Notes
+### 5.4 TODOコントローラーの更新
+- [ ] `todos.controller.ts`に認証ガード追加（JwtAuthGuard, TotpVerifiedGuard）
+- [ ] @CurrentUserデコレーターで現在のユーザー取得
+- [ ] userIdをサービスメソッドに渡す
 
-- バックアップコード（リカバリーコード）は将来の拡張として別変更で実装
-- 2FAは必須のため、無効化機能は含めない
-- テスト環境でのバイパス機能を含める（`TOTP_BYPASS_FOR_TESTING`）
+**検証**: 未認証ユーザーはTODO APIにアクセスできない
+
+### 5.5 既存TODOデータの移行
+- [ ] 既存TODOデータを確認
+- [ ] 最初にログインしたユーザーのIDを既存TODOに設定
+  - 手動スクリプトまたは自動マイグレーション
+
+**検証**: 既存TODOが適切なユーザーに紐付けられる
+
+## Phase 6: フロントエンド統合
+
+### 6.1 認証APIクライアントの作成
+- [ ] `application/frontend/src/lib/api/auth.ts`を作成
+  - Google OAuthログインURL生成
+  - 2FAセットアップAPI呼び出し
+  - TOTP検証API呼び出し
+  - ログアウトAPI呼び出し
+
+**検証**: APIクライアントが正しくバックエンドと通信
+
+### 6.2 認証状態管理の実装
+- [ ] `application/frontend/src/lib/auth/auth-context.tsx`を作成
+  - JWTトークンの保存（localStorage）
+  - 現在のユーザー情報管理
+  - 認証状態フック（useAuth）
+
+**検証**: 認証状態がアプリ全体で共有される
+
+### 6.3 ログイン画面の作成
+- [ ] `application/frontend/src/app/login/page.tsx`を作成
+  - Google OAuthログインボタン
+
+**検証**: ログインボタンクリックでGoogle OAuth同意画面へ遷移
+
+### 6.4 OAuthコールバック画面の作成
+- [ ] `application/frontend/src/app/auth/callback/page.tsx`を作成
+  - コールバックURLからトークンを取得
+  - 2FA状態に応じて適切な画面へリダイレクト
+
+**検証**: コールバック後、適切な画面へ遷移
+
+### 6.5 2FAセットアップ画面の作成
+- [ ] `application/frontend/src/app/2fa/setup/page.tsx`を作成
+  - QRコード表示
+  - シークレットキー表示
+  - TOTP検証コード入力フォーム
+
+**検証**: QRコードをスキャンしてAuthenticatorアプリに登録可能
+
+### 6.6 2FAログイン画面の作成
+- [ ] `application/frontend/src/app/2fa/verify/page.tsx`を作成
+  - TOTP検証コード入力フォーム
+  - エラーメッセージ表示
+
+**検証**: 正しいコードでログイン成功、誤ったコードでエラー表示
+
+### 6.7 保護されたルートの実装
+- [ ] `application/frontend/src/components/auth/protected-route.tsx`を作成
+  - 未認証ユーザーをログイン画面へリダイレクト
+- [ ] TODO一覧画面などを保護
+
+**検証**: 未認証ユーザーはログイン画面へリダイレクトされる
+
+### 6.8 ユーザープロフィール表示の追加
+- [ ] ヘッダーまたはサイドバーに現在のユーザー情報を表示
+- [ ] ログアウトボタンの追加
+
+**検証**: ユーザー名とログアウトボタンが表示される
+
+### 6.9 TODO APIクライアントの更新
+- [ ] `application/frontend/src/lib/api/todos.ts`にJWTトークンヘッダー追加
+  - Authorization: Bearer <token>
+- [ ] エラーハンドリング（401エラーでログイン画面へ）
+
+**検証**: TODO APIリクエストがJWTトークン付きで送信される
+
+## Phase 7: テストとドキュメント
+
+### 7.1 統合テスト
+- [ ] Google OAuthログインから2FAセットアップ、TODO作成までのE2Eフロー
+- [ ] 複数ユーザーでデータ分離を確認
+- [ ] レート制限とロックアウトをテスト
+
+**検証**: 全シナリオが期待通りに動作
+
+### 7.2 セキュリティ検証
+- [ ] TOTP秘密鍵が暗号化されてCosmosDBに保存されることを確認
+- [ ] 使用済みTOTPコードの再利用が防止されることを確認
+- [ ] 他ユーザーのTODOへのアクセスが拒否されることを確認
+
+**検証**: セキュリティ要件が満たされている
+
+### 7.3 Swaggerドキュメント更新
+- [ ] 全認証エンドポイントにSwaggerデコレーター追加
+- [ ] JWTトークンの説明を追加
+- [ ] エラーレスポンスの例を追加
+
+**検証**: Swagger UIで全エンドポイントが正しくドキュメント化
+
+### 7.4 README更新
+- [ ] 認証フローの説明を追加
+- [ ] 環境変数の設定手順を追加
+- [ ] Google OAuth設定手順を追加
+- [ ] 2FAセットアップ手順を追加
+
+**検証**: READMEを読めば新規開発者が環境構築できる
+
+## Phase 8: デプロイと監視
+
+### 8.1 環境変数の本番設定
+- [ ] Azure環境に本番用環境変数を設定
+- [ ] TOTP_ENCRYPTION_KEYを安全に生成・保存
+
+**検証**: 本番環境で環境変数が正しく読み込まれる
+
+### 8.2 本番デプロイ
+- [ ] バックエンドをAzureにデプロイ
+- [ ] フロントエンドをデプロイ
+- [ ] Google OAuth Callback URLを本番URLに更新
+
+**検証**: 本番環境で認証フロー全体が動作
+
+### 8.3 ログと監視の設定
+- [ ] 認証失敗ログの記録
+- [ ] レート制限ログの記録
+- [ ] セキュリティイベントの監視
+
+**検証**: ログが適切に記録される
+
+## タスク依存関係
+
+**並行実行可能**:
+- Phase 2（ユーザー管理）とPhase 3（Google OAuth）の一部タスクは並行可能
+- Phase 6（フロントエンド）はPhase 5完了後に開始可能
+
+**順次実行必須**:
+- Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6 → Phase 7 → Phase 8
+
+**重要マイルストーン**:
+- ✅ Phase 3完了: Google OAuthログイン可能
+- ✅ Phase 4完了: 2FA認証可能
+- ✅ Phase 5完了: TODO APIが認証保護
+- ✅ Phase 6完了: フロントエンド統合完了

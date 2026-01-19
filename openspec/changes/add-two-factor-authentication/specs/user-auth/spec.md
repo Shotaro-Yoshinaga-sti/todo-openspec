@@ -1,66 +1,119 @@
-# Spec Delta: user-auth
-
-## MODIFIED Requirements
-
-### Requirement: Google OAuth認証
-
-システムはGoogle OAuth 2.0を使用したユーザー認証機能を提供しなければなりません(MUST)。
-
-#### Scenario: Google OAuth認証成功後の2FA確認
-
-- **WHEN** ユーザーがGoogle認証画面で承認し、コールバックURL（/api/auth/google/callback）にリダイレクトされる
-- **AND** 認可コードが正常に取得される
-- **THEN** システムはGoogle APIからユーザー情報（googleId, email, name, picture）を取得する
-- **AND** システムはユーザー情報をデータベースに保存（新規ユーザー）または取得（既存ユーザー）する
-- **AND** システムはユーザーの2FAセットアップ状態を確認する
-- **AND** `twoFactorSetupComplete`がfalseの場合、一時トークンを発行して2FAセットアップページにリダイレクトする
-- **AND** `twoFactorSetupComplete`がtrueの場合、一時トークンを発行して2FA検証ページにリダイレクトする
-- **AND** 完全なJWTトークンは2FA検証後のみ発行される
-
-### Requirement: JWTトークン発行
-
-システムは認証成功時にJWT（JSON Web Token）を発行しなければなりません(MUST)。
-
-#### Scenario: 2FA検証前の一時トークン発行
-
-- **WHEN** ユーザーがGoogle OAuth認証に成功する
-- **THEN** システムは以下の情報を含む一時トークンを生成する:
-  - `sub`: ユーザーID（UUID）
-  - `email`: ユーザーのメールアドレス
-  - `requiresTwoFactor`: true
-  - `iat`: 発行時刻（UNIX timestamp）
-  - `exp`: 有効期限（発行時刻 + 5分）
-- **AND** トークンはJWT_SECRETで署名される
-- **AND** 一時トークンでは保護されたリソースにアクセスできない
-
-#### Scenario: 2FA検証後の完全なJWTトークン発行
-
-- **WHEN** ユーザーが2FA検証に成功する
-- **THEN** システムは以下の情報を含む完全なJWTトークンを生成する:
-  - `sub`: ユーザーID（UUID）
-  - `email`: ユーザーのメールアドレス
-  - `twoFactorVerified`: true
-  - `iat`: 発行時刻（UNIX timestamp）
-  - `exp`: 有効期限（JWT_EXPIRES_INで指定された期間、デフォルト: 1時間）
-- **AND** トークンはJWT_SECRETで署名される
-- **AND** 完全なトークンでTODO APIへのアクセスが可能
+# user-auth Specification Delta
 
 ## ADDED Requirements
 
-### Requirement: 2FA必須化
+### Requirement: Google OAuth認証
 
-システムはすべてのユーザーに対して2FAを必須化しなければなりません(MUST)。
+システムはGoogle OAuthを使用してユーザー認証を提供しなければなりません(MUST)。
 
-#### Scenario: 新規ユーザーの2FA強制
+#### Scenario: Google OAuth認証成功
 
-- **WHEN** 新規ユーザーが初めてGoogle OAuth認証を完了する
-- **THEN** システムは`twoFactorEnabled`をtrueに設定する
-- **AND** `twoFactorSetupComplete`をfalseに設定する
-- **AND** 2FAセットアップページへのリダイレクトを返す
+- **WHEN** ユーザーがGET /api/auth/googleにアクセスする
+- **THEN** システムはGoogle OAuth同意画面にリダイレクトする
+- **AND** ユーザーがGoogleアカウントで認証を許可する
+- **AND** システムはコールバックURLにリダイレクトされる
+- **AND** 一時JWTトークンが発行される（2FA未完了）
 
-#### Scenario: 既存ユーザーの2FA必須化
+#### Scenario: 初回ログイン時のユーザー自動作成
 
-- **WHEN** 2FA未設定の既存ユーザーがログインする
-- **THEN** システムは`twoFactorEnabled`をtrueに更新する
-- **AND** 2FAセットアップページへのリダイレクトを返す
-- **AND** セットアップ完了まで完全なJWTトークンは発行しない
+- **WHEN** 新規ユーザーがGoogle OAuthで認証する
+- **THEN** システムは新しいUserレコードを自動作成する
+- **AND** ユーザー情報（email, name, googleId）が保存される
+- **AND** twoFactorSetupCompleteはfalseに設定される
+
+#### Scenario: 既存ユーザーのログイン
+
+- **WHEN** 既存ユーザーがGoogle OAuthで認証する
+- **THEN** システムはgoogleIdで既存ユーザーを検索する
+- **AND** ユーザー情報が取得される
+- **AND** 一時JWTトークンが発行される
+
+#### Scenario: Google OAuth認証失敗
+
+- **WHEN** ユーザーがGoogle OAuth同意画面で拒否する
+- **THEN** システムは認証エラーを返す
+- **AND** ユーザーはログインページにリダイレクトされる
+
+### Requirement: 二要素認証フロー
+
+システムは二要素認証を必須としなければなりません(MUST)。
+
+#### Scenario: 初回ログイン時の2FAセットアップ誘導
+
+- **WHEN** 新規ユーザーがGoogle OAuth認証に成功する
+- **AND** twoFactorSetupCompleteがfalseである
+- **THEN** システムは2FAセットアップ画面にリダイレクトする
+- **AND** 一時トークン（有効期限10分）が返される
+
+#### Scenario: 2回目以降のログイン時のTOTP検証
+
+- **WHEN** 既存ユーザーがGoogle OAuth認証に成功する
+- **AND** twoFactorSetupCompleteがtrueである
+- **THEN** システムはTOTP検証画面にリダイレクトする
+- **AND** 一時トークン（有効期限10分）が返される
+
+#### Scenario: 2FA検証成功後の本トークン発行
+
+- **WHEN** ユーザーが正しいTOTPコードを入力する
+- **THEN** システムはTOTPコードを検証する
+- **AND** 検証成功時、本JWTトークン（有効期限7日）を発行する
+- **AND** ユーザーは完全に認証された状態になる
+
+#### Scenario: 2FA検証なしでのAPI保護
+
+- **WHEN** ユーザーが一時トークンで保護されたAPIにアクセスする
+- **AND** twoFactorVerifiedフラグがfalseである
+- **THEN** システムは401 Unauthorizedエラーを返す
+- **AND** エラーメッセージは"Two-factor authentication required"である
+
+### Requirement: JWTトークン管理
+
+システムはJWTトークンを使用してセッション管理を行わなければなりません(MUST)。
+
+#### Scenario: 一時トークンの発行
+
+- **WHEN** ユーザーがGoogle OAuth認証に成功する
+- **AND** 2FA検証がまだ完了していない
+- **THEN** システムは以下を含む一時JWTトークンを発行する:
+  - sub: userId
+  - email: user.email
+  - twoFactorVerified: false
+  - exp: 10分後
+
+#### Scenario: 本トークンの発行
+
+- **WHEN** ユーザーが2FA検証に成功する
+- **THEN** システムは以下を含む本JWTトークンを発行する:
+  - sub: userId
+  - email: user.email
+  - twoFactorVerified: true
+  - exp: 7日後
+
+#### Scenario: トークンの検証
+
+- **WHEN** ユーザーが保護されたエンドポイントにアクセスする
+- **AND** Authorizationヘッダーに有効なJWTトークンが含まれる
+- **THEN** システムはトークンを検証する
+- **AND** ペイロードからユーザー情報を抽出する
+- **AND** リクエストを処理する
+
+#### Scenario: 無効なトークンでのアクセス拒否
+
+- **WHEN** ユーザーが無効または期限切れのトークンでアクセスする
+- **THEN** システムは401 Unauthorizedエラーを返す
+- **AND** エラーメッセージは"Invalid or expired token"である
+
+### Requirement: ログアウト
+
+システムはログアウト機能を提供しなければなりません(MUST)。
+
+#### Scenario: ログアウト成功
+
+- **WHEN** 認証済みユーザーがPOST /api/auth/logoutをリクエストする
+- **THEN** システムは200 OKを返す
+- **AND** フロントエンドはトークンを削除する必要がある
+
+#### Scenario: トークンなしでのログアウト
+
+- **WHEN** 未認証ユーザーがPOST /api/auth/logoutをリクエストする
+- **THEN** システムは401 Unauthorizedエラーを返す

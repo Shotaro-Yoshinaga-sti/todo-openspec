@@ -1,91 +1,112 @@
-# Spec Delta: user-management
-
-## MODIFIED Requirements
-
-### Requirement: ユーザーエンティティ
-
-システムはユーザー情報を管理するためのUserエンティティを定義しなければなりません(MUST)。
-
-#### Scenario: Userエンティティのデータ構造（2FAフィールド追加）
-
-- **WHEN** ユーザーが作成または取得される
-- **THEN** Userエンティティは以下のフィールドを含む:
-  - `id`: string (UUID形式、自動生成、プライマリキー)
-  - `googleId`: string (Google OAuth ID、ユニーク制約)
-  - `email`: string (メールアドレス、ユニーク制約)
-  - `name`: string (表示名)
-  - `picture`: string | undefined (プロフィール画像URL、オプション)
-  - `createdAt`: Date (アカウント作成日時、自動設定)
-  - `updatedAt`: Date (最終更新日時、自動更新)
-  - **`totpSecret`: string | undefined** (TOTP秘密鍵、暗号化、オプション) ← **追加**
-  - **`twoFactorEnabled`: boolean** (2FA有効フラグ、デフォルト: true) ← **追加**
-  - **`twoFactorSetupComplete`: boolean** (2FAセットアップ完了フラグ、デフォルト: false) ← **追加**
-  - **`totpSetupDate`: Date | undefined** (2FAセットアップ日時、オプション) ← **追加**
-  - **`totpLastVerified`: Date | undefined** (最終2FA検証日時、オプション) ← **追加**
+# user-management Specification Delta
 
 ## ADDED Requirements
 
-### Requirement: TOTP秘密鍵の管理
+### Requirement: ユーザーデータモデル
 
-システムは各ユーザーのTOTP秘密鍵を安全に管理しなければなりません(MUST)。
+システムはユーザー情報を管理するUserエンティティを定義しなければなりません(MUST)。
 
-#### Scenario: TOTP秘密鍵の保存
+#### Scenario: Userエンティティの構造検証
 
-- **WHEN** ユーザーが2FAセットアップを開始する
-- **THEN** システムはTOTP秘密鍵を生成する
-- **AND** 秘密鍵をAES-256-GCMで暗号化する
-- **AND** 暗号化された秘密鍵を`totpSecret`フィールドに保存する
-- **AND** 平文の秘密鍵はデータベースに保存しない
+- **WHEN** Userレコードが作成または取得される
+- **THEN** Userは以下のフィールドを含む:
+  - `id`: string (UUID形式、自動生成)
+  - `email`: string (必須、Google アカウントメール)
+  - `name`: string (必須、表示名)
+  - `googleId`: string (必須、ユニーク、Google ユーザーID)
+  - `totpSecret`: string (オプション、暗号化済みTOTP秘密鍵)
+  - `twoFactorEnabled`: boolean (必須、デフォルト: false)
+  - `twoFactorSetupComplete`: boolean (必須、デフォルト: false)
+  - `createdAt`: Date (自動設定)
+  - `updatedAt`: Date (自動更新)
 
-#### Scenario: TOTP秘密鍵の取得
+### Requirement: ユーザー作成
 
-- **WHEN** システムがTOTP検証のために秘密鍵が必要になる
-- **THEN** CosmosDBから`totpSecret`フィールドを取得する
-- **AND** 環境変数の暗号化キーを使用して復号化する
-- **AND** 復号化した秘密鍵をメモリ上でのみ使用する
+システムは新規ユーザーを作成する機能を提供しなければなりません(MUST)。
 
-### Requirement: 2FA設定状態の管理
+#### Scenario: Google OAuthでの初回ユーザー作成
 
-システムは各ユーザーの2FA設定状態を管理しなければなりません(MUST)。
+- **WHEN** 新規ユーザーがGoogle OAuthで認証する
+- **AND** googleIdが既存ユーザーと一致しない
+- **THEN** システムは新しいUserレコードを作成する
+- **AND** email, name, googleIdがGoogle プロフィールから設定される
+- **AND** twoFactorEnabledはfalseに設定される
+- **AND** twoFactorSetupCompleteはfalseに設定される
+- **AND** createdAtとupdatedAtは現在のタイムスタンプに設定される
 
-#### Scenario: 2FAセットアップ完了時の状態更新
+#### Scenario: 既存ユーザーの重複作成防止
 
-- **WHEN** ユーザーが2FAセットアップを完了する（初回TOTP検証成功）
-- **THEN** `twoFactorSetupComplete`をtrueに更新する
-- **AND** `totpSetupDate`を現在時刻に設定する
-- **AND** `twoFactorEnabled`をtrueに設定する（既にtrueの場合は変更なし）
+- **WHEN** 既存のgoogleIdでユーザーを作成しようとする
+- **THEN** システムは既存ユーザーを返す
+- **AND** 新しいレコードは作成されない
 
-#### Scenario: TOTP検証成功時の状態更新
+### Requirement: ユーザー情報取得
 
-- **WHEN** ユーザーがログイン時のTOTP検証に成功する
-- **THEN** `totpLastVerified`を現在時刻に更新する
+システムは認証済みユーザーの情報を取得する機能を提供しなければなりません(MUST)。
 
-#### Scenario: 2FA状態の確認
+#### Scenario: 現在のユーザー情報取得
 
-- **WHEN** システムがユーザーの2FA状態を確認する
-- **THEN** `twoFactorEnabled`がtrueかつ`twoFactorSetupComplete`がtrueの場合、2FA必須とする
-- **AND** `twoFactorSetupComplete`がfalseの場合、セットアップが必要とする
+- **WHEN** 認証済みユーザーがGET /api/users/meをリクエストする
+- **THEN** システムは現在のユーザー情報を返す
+- **AND** レスポンスステータスは200 OKである
+- **AND** 返されるデータにtotpSecretは含まれない（セキュリティ）
 
-### Requirement: ユーザー情報のレスポンス形式
+#### Scenario: 未認証ユーザーの情報取得拒否
 
-システムはユーザー情報を返す際、一貫した形式を使用しなければなりません(MUST)。
+- **WHEN** 未認証ユーザーがGET /api/users/meをリクエストする
+- **THEN** システムは401 Unauthorizedエラーを返す
 
-#### Scenario: ユーザー情報の成功レスポンス（2FA情報含む）
+### Requirement: ユーザー情報更新
 
-- **WHEN** クライアントがユーザー情報を取得する（例: /api/auth/me）
-- **THEN** システムは以下の形式でレスポンスを返す:
-  ```json
-  {
-    "success": true,
-    "data": {
-      "id": "uuid",
-      "email": "user@example.com",
-      "name": "User Name",
-      "picture": "https://example.com/picture.jpg",
-      "createdAt": "2024-01-01T00:00:00Z",
-      "twoFactorEnabled": true,
-      "twoFactorSetupComplete": true
-    }
-  }
-  ```
-- **NOTE**: `totpSecret`、`totpSetupDate`、`totpLastVerified`はセキュリティ上、クライアントに返さない
+システムは認証済みユーザーの情報を更新する機能を提供しなければなりません(MUST)。
+
+#### Scenario: ユーザー名の更新
+
+- **WHEN** 認証済みユーザーがPUT /api/users/meでnameを更新する
+- **THEN** システムはユーザーのnameを更新する
+- **AND** updatedAtは現在のタイムスタンプに更新される
+- **AND** 更新されたユーザー情報を200 OKで返す
+
+#### Scenario: 保護されたフィールドの更新拒否
+
+- **WHEN** ユーザーがgoogleId, totpSecret, twoFactorEnabledを更新しようとする
+- **THEN** システムは400 Bad Requestエラーを返す
+- **AND** エラーメッセージは"Cannot update protected fields"である
+
+### Requirement: ユーザー検索
+
+システムはgoogleIdまたはemailでユーザーを検索する機能を提供しなければなりません(MUST)。
+
+#### Scenario: googleIdでユーザー検索成功
+
+- **WHEN** システムがgoogleIdでユーザーを検索する
+- **AND** 一致するユーザーが存在する
+- **THEN** システムは該当ユーザーを返す
+
+#### Scenario: googleIdでユーザー検索失敗
+
+- **WHEN** システムがgoogleIdでユーザーを検索する
+- **AND** 一致するユーザーが存在しない
+- **THEN** システムはnullを返す
+
+#### Scenario: emailでユーザー検索成功
+
+- **WHEN** システムがemailでユーザーを検索する
+- **AND** 一致するユーザーが存在する
+- **THEN** システムは該当ユーザーを返す
+
+### Requirement: データ永続化
+
+システムはユーザーデータをCosmosDBに永続化しなければなりません(MUST)。
+
+#### Scenario: ユーザーの作成と永続化
+
+- **WHEN** 新規ユーザーが作成される
+- **THEN** システムはCosmosDBにUserレコードを保存する
+- **AND** 保存されたユーザーは再起動後も取得可能である
+
+#### Scenario: ユーザー情報の更新と永続化
+
+- **WHEN** ユーザー情報が更新される
+- **THEN** システムはCosmosDBの既存レコードを更新する
+- **AND** updatedAtタイムスタンプが更新される
